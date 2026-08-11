@@ -123,9 +123,11 @@ function Resolve-ClaudeCodeArchive {
     if (-not $curl) {
         throw "curl is required to download the Claude Code Linux archive. Provide -ClaudeCodeArchivePath instead."
     }
-    & $curl.Source --fail --location --silent --show-error --output $archive $archiveUrl
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to download Claude Code Linux archive from $archiveUrl. Provide -ClaudeCodeArchivePath instead."
+    $curlOutput = & $curl.Source --fail --location --silent --show-error --output $archive $archiveUrl 2>&1
+    $curlExitCode = $LASTEXITCODE
+    if ($curlExitCode -ne 0) {
+        $curlSummary = ($curlOutput | Out-String).Trim()
+        throw "Failed to download Claude Code Linux archive from $archiveUrl (curl exit $curlExitCode): $curlSummary"
     }
     if (-not (Test-TarArchive $archive)) {
         throw "Downloaded Claude Code Linux archive is invalid: $archive"
