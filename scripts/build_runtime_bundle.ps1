@@ -112,13 +112,17 @@ function Resolve-ClaudeCodeArchive {
         return $archive
     }
 
-    $npm = Get-Command npm -ErrorAction SilentlyContinue
-    if (-not $npm) {
-        throw "npm is required to download @anthropic-ai/claude-code-linux-x64@$Version. Provide -ClaudeCodeArchivePath instead."
+    if (Test-Path $archive) {
+        Remove-Item -Force $archive
     }
-    & npm pack "@anthropic-ai/claude-code-linux-x64@$Version" --pack-destination $claudeCacheRoot
-    if ($LASTEXITCODE -ne 0 -or -not (Test-TarArchive $archive)) {
-        throw "Failed to download Claude Code Linux archive: $archiveName"
+    $archiveUrl = "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-$Version.tgz"
+    try {
+        Invoke-WebRequest -Uri $archiveUrl -OutFile $archive -Headers @{ 'User-Agent' = 'ccrelay-build' }
+    } catch {
+        throw "Failed to download Claude Code Linux archive from $archiveUrl. Provide -ClaudeCodeArchivePath instead."
+    }
+    if (-not (Test-TarArchive $archive)) {
+        throw "Downloaded Claude Code Linux archive is invalid: $archive"
     }
     return $archive
 }
@@ -169,7 +173,7 @@ if ($RuntimeHomePath) {
         Download-RuntimeArchive -Url $RuntimeArchiveUrl -DestinationPath $runtimeArchivePath
     }
 
-    $runtimeHome = Get-ChildItem -Path $runtimeExtractRoot -Directory | Select-Object -First 1
+    $runtimeHome = Get-ChildItem -Path $runtimeExtractRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $runtimeHome -or -not (Test-Path (Join-Path $runtimeHome.FullName 'bin/java'))) {
         if (Test-Path $runtimeExtractRoot) {
             Remove-Item -Recurse -Force $runtimeExtractRoot
