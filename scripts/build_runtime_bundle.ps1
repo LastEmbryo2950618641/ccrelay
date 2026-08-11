@@ -1,7 +1,7 @@
 param(
     [string]$BootJarPath,
-    [string]$BundleRoot = (Join-Path $PSScriptRoot '..\build\runtime-bundle\ccrelay'),
-    [string]$RuntimeCacheRoot = (Join-Path $PSScriptRoot '..\.cache\runtime-bundle'),
+    [string]$BundleRoot = (Join-Path $PSScriptRoot '../build/runtime-bundle/ccrelay'),
+    [string]$RuntimeCacheRoot = (Join-Path $PSScriptRoot '../.cache/runtime-bundle'),
     [string]$RuntimeArchivePath,
     [string]$RuntimeHomePath,
     [string]$RuntimeArchiveUrl = 'https://api.adoptium.net/v3/binary/latest/21/ga/linux/x64/jre/hotspot/normal/eclipse',
@@ -104,7 +104,7 @@ function Resolve-ClaudeCodeArchive {
         return $resolved
     }
 
-    $claudeCacheRoot = Join-Path $CacheRoot '..\claude-code-linux-x64'
+    $claudeCacheRoot = Join-Path $CacheRoot '../claude-code-linux-x64'
     New-Item -ItemType Directory -Force -Path $claudeCacheRoot | Out-Null
     $archiveName = "anthropic-ai-claude-code-linux-x64-$Version.tgz"
     $archive = Join-Path $claudeCacheRoot $archiveName
@@ -124,17 +124,17 @@ function Resolve-ClaudeCodeArchive {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$installRelayScriptPath = Join-Path $repoRoot 'scripts\install-relay.sh'
-$installRelayPowerShellScriptPath = Join-Path $repoRoot 'scripts\install-relay.ps1'
-$ccConfigTemplatePath = Join-Path $repoRoot 'codex-skill\ccrelay\assets\config-templates\cc-model-config.template.yml'
-$relaySystemPromptPath = Join-Path $repoRoot 'src\main\resources\config\relay-system-prompt.txt'
-$prepareCcConfigPath = Join-Path $repoRoot 'scripts\prepare_cc_config.py'
+$installRelayScriptPath = Join-Path $repoRoot 'scripts/install-relay.sh'
+$installRelayPowerShellScriptPath = Join-Path $repoRoot 'scripts/install-relay.ps1'
+$ccConfigTemplatePath = Join-Path $repoRoot 'codex-skill/ccrelay/assets/config-templates/cc-model-config.template.yml'
+$relaySystemPromptPath = Join-Path $repoRoot 'src/main/resources/config/relay-system-prompt.txt'
+$prepareCcConfigPath = Join-Path $repoRoot 'scripts/prepare_cc_config.py'
 if (-not $BootJarPath) {
     & (Join-Path $repoRoot 'gradlew.bat') bootJar
     if ($LASTEXITCODE -ne 0) {
         throw 'bootJar build failed.'
     }
-    $bootJar = Get-ChildItem -Path (Join-Path $repoRoot 'build\libs') -Filter '*.jar' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $bootJar = Get-ChildItem -Path (Join-Path $repoRoot 'build/libs') -Filter '*.jar' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $bootJar) {
         throw 'bootJar was not found after build.'
     }
@@ -170,7 +170,7 @@ if ($RuntimeHomePath) {
     }
 
     $runtimeHome = Get-ChildItem -Path $runtimeExtractRoot -Directory | Select-Object -First 1
-    if (-not $runtimeHome -or -not (Test-Path (Join-Path $runtimeHome.FullName 'bin\java'))) {
+    if (-not $runtimeHome -or -not (Test-Path (Join-Path $runtimeHome.FullName 'bin/java'))) {
         if (Test-Path $runtimeExtractRoot) {
             Remove-Item -Recurse -Force $runtimeExtractRoot
         }
@@ -184,7 +184,7 @@ if ($RuntimeHomePath) {
     if (-not $runtimeHome) {
         throw 'Unable to locate extracted runtime directory.'
     }
-    if (-not (Test-Path (Join-Path $runtimeHome.FullName 'bin\java'))) {
+    if (-not (Test-Path (Join-Path $runtimeHome.FullName 'bin/java'))) {
         throw 'Extracted runtime does not contain bin/java.'
     }
 }
@@ -197,7 +197,7 @@ if (-not (Test-ZipArchive $windowsRuntimeArchivePath)) {
     Download-WindowsRuntimeArchive -Url $WindowsRuntimeArchiveUrl -DestinationPath $windowsRuntimeArchivePath
 }
 $windowsRuntimeHome = Get-ChildItem -Path $windowsRuntimeExtractRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { Test-Path (Join-Path $_.FullName 'bin\java.exe') } | Select-Object -First 1
+    Where-Object { Test-Path (Join-Path $_.FullName 'bin/java.exe') } | Select-Object -First 1
 if (-not $windowsRuntimeHome) {
     if (Test-Path $windowsRuntimeExtractRoot) {
         Remove-Item -Recurse -Force $windowsRuntimeExtractRoot
@@ -205,7 +205,7 @@ if (-not $windowsRuntimeHome) {
     New-Item -ItemType Directory -Force -Path $windowsRuntimeExtractRoot | Out-Null
     Expand-Archive -LiteralPath $windowsRuntimeArchivePath -DestinationPath $windowsRuntimeExtractRoot -Force
     $windowsRuntimeHome = Get-ChildItem -Path $windowsRuntimeExtractRoot -Directory |
-        Where-Object { Test-Path (Join-Path $_.FullName 'bin\java.exe') } | Select-Object -First 1
+        Where-Object { Test-Path (Join-Path $_.FullName 'bin/java.exe') } | Select-Object -First 1
 }
 if (-not $windowsRuntimeHome) {
     throw 'Unable to locate extracted Windows JRE directory.'
@@ -257,7 +257,7 @@ Copy-Item -Path $runtimeArchivePath -Destination (Join-Path $BundleRoot 'runtime
 Copy-Item -Path $windowsRuntimeArchivePath -Destination (Join-Path $BundleRoot 'runtime-windows.zip') -Force
 Copy-Item -Recurse -Force -Path $pythonWindowsHome.FullName -Destination (Join-Path $BundleRoot 'python-windows')
 Copy-Item -Force -Path $pythonLinuxArchivePath -Destination (Join-Path $BundleRoot 'python-linux.tar.gz')
-Copy-Item -Path $claudeCodeArchive -Destination (Join-Path $BundleRoot 'tools\claude-code-linux-x64.tgz') -Force
+Copy-Item -Path $claudeCodeArchive -Destination (Join-Path $BundleRoot 'tools/claude-code-linux-x64.tgz') -Force
 if (Test-Path $claudeExtractRoot) {
     Remove-Item -Recurse -Force $claudeExtractRoot
 }
@@ -266,11 +266,11 @@ New-Item -ItemType Directory -Force -Path $claudeExtractRoot | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to extract Claude Code archive: $claudeCodeArchive"
 }
-$claudeBinary = Join-Path $claudeExtractRoot 'package\claude'
+$claudeBinary = Join-Path $claudeExtractRoot 'package/claude'
 if (-not (Test-Path $claudeBinary)) {
     throw "Claude binary not found after extract: $claudeBinary"
 }
-Copy-Item -Path $claudeBinary -Destination (Join-Path $BundleRoot 'bin\claude') -Force
+Copy-Item -Path $claudeBinary -Destination (Join-Path $BundleRoot 'bin/claude') -Force
 if (-not (Test-Path $installRelayScriptPath)) {
     throw "install-relay.sh not found: $installRelayScriptPath"
 }
@@ -288,7 +288,7 @@ Copy-Item -Path $collaborationCliShPath -Destination (Join-Path $BundleRoot 'bin
 Copy-Item -Path $collaborationCliCmdPath -Destination (Join-Path $BundleRoot 'bin/ccrelay-cli.cmd') -Force
 if (Test-Path $ccConfigTemplatePath) {
     New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot 'config') | Out-Null
-    Copy-Item -Path $ccConfigTemplatePath -Destination (Join-Path $BundleRoot 'config\cc-model-config.template.yml') -Force
+    Copy-Item -Path $ccConfigTemplatePath -Destination (Join-Path $BundleRoot 'config/cc-model-config.template.yml') -Force
 }
 if ($ModelConfigPath) {
     $resolvedModelConfigPath = (Resolve-Path $ModelConfigPath -ErrorAction Stop).Path
@@ -296,15 +296,15 @@ if ($ModelConfigPath) {
         throw "ModelConfigPath must point to a file: $ModelConfigPath"
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot 'config') | Out-Null
-    Copy-Item -Path $resolvedModelConfigPath -Destination (Join-Path $BundleRoot 'config\cc-model-config.yml') -Force
+    Copy-Item -Path $resolvedModelConfigPath -Destination (Join-Path $BundleRoot 'config/cc-model-config.yml') -Force
 }
 if (Test-Path $relaySystemPromptPath) {
     New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot 'config') | Out-Null
-    Copy-Item -Path $relaySystemPromptPath -Destination (Join-Path $BundleRoot 'config\relay-system-prompt.txt') -Force
+    Copy-Item -Path $relaySystemPromptPath -Destination (Join-Path $BundleRoot 'config/relay-system-prompt.txt') -Force
 }
 if (Test-Path $prepareCcConfigPath) {
     New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot 'bin') | Out-Null
-    Copy-Item -Path $prepareCcConfigPath -Destination (Join-Path $BundleRoot 'bin\prepare_cc_config.py') -Force
+    Copy-Item -Path $prepareCcConfigPath -Destination (Join-Path $BundleRoot 'bin/prepare_cc_config.py') -Force
 }
 
 $startScript = @'
@@ -346,16 +346,16 @@ $manifest = [ordered]@{
     pythonLinuxHome = '.local/runtime/python-linux-3.13.15'
     pythonVersion = '3.13.15'
     claudeCodeArchive = $claudeCodeArchive
-    claudeCodeArchiveInBundle = (Join-Path $BundleRoot 'tools\claude-code-linux-x64.tgz')
+    claudeCodeArchiveInBundle = (Join-Path $BundleRoot 'tools/claude-code-linux-x64.tgz')
     appJar = (Join-Path $BundleRoot 'app.jar')
     installRelayScript = (Join-Path $BundleRoot 'install-relay.sh')
     installRelayPowerShellScript = (Join-Path $BundleRoot 'install-relay.ps1')
-    ccConfigTemplate = if (Test-Path (Join-Path $BundleRoot 'config\cc-model-config.template.yml')) { (Join-Path $BundleRoot 'config\cc-model-config.template.yml') } else { $null }
-    relaySystemPrompt = if (Test-Path (Join-Path $BundleRoot 'config\relay-system-prompt.txt')) { (Join-Path $BundleRoot 'config\relay-system-prompt.txt') } else { $null }
-    ccConfig = if (Test-Path (Join-Path $BundleRoot 'config\cc-model-config.yml')) { (Join-Path $BundleRoot 'config\cc-model-config.yml') } else { $null }
+    ccConfigTemplate = if (Test-Path (Join-Path $BundleRoot 'config/cc-model-config.template.yml')) { (Join-Path $BundleRoot 'config/cc-model-config.template.yml') } else { $null }
+    relaySystemPrompt = if (Test-Path (Join-Path $BundleRoot 'config/relay-system-prompt.txt')) { (Join-Path $BundleRoot 'config/relay-system-prompt.txt') } else { $null }
+    ccConfig = if (Test-Path (Join-Path $BundleRoot 'config/cc-model-config.yml')) { (Join-Path $BundleRoot 'config/cc-model-config.yml') } else { $null }
     modelConfigRequired = $true
     modelConfigSource = if ($ModelConfigPath) { 'LOCAL_PROTECTED_CONFIG' } else { 'NOT_PROVIDED' }
-    prepareCcConfig = if (Test-Path (Join-Path $BundleRoot 'bin\prepare_cc_config.py')) { (Join-Path $BundleRoot 'bin\prepare_cc_config.py') } else { $null }
+    prepareCcConfig = if (Test-Path (Join-Path $BundleRoot 'bin/prepare_cc_config.py')) { (Join-Path $BundleRoot 'bin/prepare_cc_config.py') } else { $null }
     relayCli = (Join-Path $BundleRoot 'bin/ccrelay-cli')
     relayCliWindows = (Join-Path $BundleRoot 'bin/ccrelay-cli.cmd')
     startScript = (Join-Path $BundleRoot 'bin/start.sh')
@@ -377,16 +377,16 @@ $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Bundl
     pythonLinuxHome = '.local/runtime/python-linux-3.13.15'
     pythonVersion = '3.13.15'
     claudeCodeArchive = $claudeCodeArchive
-    claudeCodeArchiveInBundle = (Join-Path $BundleRoot 'tools\claude-code-linux-x64.tgz')
+    claudeCodeArchiveInBundle = (Join-Path $BundleRoot 'tools/claude-code-linux-x64.tgz')
     appJar = (Join-Path $BundleRoot 'app.jar')
     installRelayScript = (Join-Path $BundleRoot 'install-relay.sh')
     installRelayPowerShellScript = (Join-Path $BundleRoot 'install-relay.ps1')
-    ccConfigTemplate = if (Test-Path (Join-Path $BundleRoot 'config\cc-model-config.template.yml')) { (Join-Path $BundleRoot 'config\cc-model-config.template.yml') } else { $null }
-    relaySystemPrompt = if (Test-Path (Join-Path $BundleRoot 'config\relay-system-prompt.txt')) { (Join-Path $BundleRoot 'config\relay-system-prompt.txt') } else { $null }
-    ccConfig = if (Test-Path (Join-Path $BundleRoot 'config\cc-model-config.yml')) { (Join-Path $BundleRoot 'config\cc-model-config.yml') } else { $null }
+    ccConfigTemplate = if (Test-Path (Join-Path $BundleRoot 'config/cc-model-config.template.yml')) { (Join-Path $BundleRoot 'config/cc-model-config.template.yml') } else { $null }
+    relaySystemPrompt = if (Test-Path (Join-Path $BundleRoot 'config/relay-system-prompt.txt')) { (Join-Path $BundleRoot 'config/relay-system-prompt.txt') } else { $null }
+    ccConfig = if (Test-Path (Join-Path $BundleRoot 'config/cc-model-config.yml')) { (Join-Path $BundleRoot 'config/cc-model-config.yml') } else { $null }
     modelConfigRequired = $true
     modelConfigSource = if ($ModelConfigPath) { 'LOCAL_PROTECTED_CONFIG' } else { 'NOT_PROVIDED' }
-    prepareCcConfig = if (Test-Path (Join-Path $BundleRoot 'bin\prepare_cc_config.py')) { (Join-Path $BundleRoot 'bin\prepare_cc_config.py') } else { $null }
+    prepareCcConfig = if (Test-Path (Join-Path $BundleRoot 'bin/prepare_cc_config.py')) { (Join-Path $BundleRoot 'bin/prepare_cc_config.py') } else { $null }
     relayCli = (Join-Path $BundleRoot 'bin/ccrelay-cli')
     relayCliWindows = (Join-Path $BundleRoot 'bin/ccrelay-cli.cmd')
     startScript = (Join-Path $BundleRoot 'bin/start.sh')
