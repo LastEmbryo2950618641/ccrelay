@@ -72,9 +72,16 @@ jobs:
           if (-not $bootJar) {
             throw 'Boot JAR was not generated.'
           }
-          ./scripts/build_runtime_bundle.ps1 `
-            -BootJarPath $bootJar.FullName `
-            -BundleRoot ./build/runtime-bundle/ccrelay
+          try {
+            ./scripts/build_runtime_bundle.ps1 `
+              -BootJarPath $bootJar.FullName `
+              -BundleRoot ./build/runtime-bundle/ccrelay
+          } catch {
+            $message = ($_ | Out-String).Trim()
+            $annotation = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Host "::error title=Runtime bundle failed::$annotation"
+            throw
+          }
 
       - name: Assemble runnable Skill
         run: bash build.sh
