@@ -26,6 +26,7 @@ CC Relay 是面向所有支持标准 Skill 的 AI 产品的远端多 Agent 协�
 - 校验技能：`powershell -ExecutionPolicy Bypass -File scripts/validate_codex_skill.ps1`
 - 安装源目录到本地 Skill 目录：`powershell -ExecutionPolicy Bypass -File scripts/install_codex_skill.ps1 codex-skill/ccrelay --force`
 - 安装打包后的 Skill：`powershell -ExecutionPolicy Bypass -File scripts/install_codex_skill.ps1 dist/skill/ccrelay --force`
+
 - 从旧版 `wdsavs-ai-agent-runtime` 升级时，安装器会迁移 `.local` 中的中心配置、SSH 凭据和身份状态到 `skills/ccrelay`，成功后删除旧 Skill 目录。
 - 自动化校验、安装与回归：`powershell -ExecutionPolicy Bypass -File scripts/test_codex_skill_flow.ps1`
 - CC 配置模板：`codex-skill/ccrelay/assets/config-templates/cc-model-config.template.yml`
@@ -35,6 +36,14 @@ CC Relay 是面向所有支持标准 Skill 的 AI 产品的远端多 Agent 协�
 - 开发仓库中可直接使用 `powershell -ExecutionPolicy Bypass -File codex-skill/ccrelay/scripts/ccrelay-cli.ps1 --help`
 - 全局 `ccrelay-cli` 仅是可选快捷别名，不作为标准 Skill 依赖。
 - CLI 中文手册：`docs/commands/ccrelay-cli.md`
+
+## GitHub Actions 构建
+
+仓库内置 `.github/workflows/build-skill-zip.yml`：
+
+- 推送到 `main` 或在 Actions 页面手动运行时，构建完整的自包含 Skill ZIP，并保留为 30 天的工作流产物。
+- 推送 `v*` 标签时，除生成工作流产物外，还会创建或更新对应 GitHub Release，并上传 ZIP 与 SHA-256 文件。
+- ZIP 名称格式为 `ccrelay-<version>-<short-sha>.zip`，解压后顶层目录为 `ccrelay/`。
 
 ## 任务观测
 
