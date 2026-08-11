@@ -116,9 +116,15 @@ function Resolve-ClaudeCodeArchive {
         Remove-Item -Force $archive
     }
     $archiveUrl = "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-$Version.tgz"
-    try {
-        Invoke-WebRequest -Uri $archiveUrl -OutFile $archive -Headers @{ 'User-Agent' = 'ccrelay-build' }
-    } catch {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $curl) {
+        $curl = Get-Command curl -ErrorAction SilentlyContinue
+    }
+    if (-not $curl) {
+        throw "curl is required to download the Claude Code Linux archive. Provide -ClaudeCodeArchivePath instead."
+    }
+    & $curl.Source --fail --location --silent --show-error --output $archive $archiveUrl
+    if ($LASTEXITCODE -ne 0) {
         throw "Failed to download Claude Code Linux archive from $archiveUrl. Provide -ClaudeCodeArchivePath instead."
     }
     if (-not (Test-TarArchive $archive)) {
