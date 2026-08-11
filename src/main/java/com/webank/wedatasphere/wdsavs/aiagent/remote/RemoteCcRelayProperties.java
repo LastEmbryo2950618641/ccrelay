@@ -30,7 +30,7 @@ public class RemoteCcRelayProperties {
     private String nodeHost;
     private String nodeRole = "RELAY";
     private String relayEndpoint;
-    private String version = "2.0.0";
+    private String version = "0.1.0";
     private String protocolVersion = "1.0";
     private List<String> capabilities = new ArrayList<>(List.of("CHAT", "A2A_MESSAGE_SEND", "A2A_TASK_CREATE", "A2A_TASK_GET", "A2A_TASK_CANCEL", "SELF_REPLICATE"));
     private long timeoutMs = 600000L;
