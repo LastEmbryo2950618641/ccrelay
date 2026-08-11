@@ -680,7 +680,10 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertNotIn("secret-password", result.stdout)
         self.assertTrue(self.ssh_config_path.is_file())
         stored = self.ssh_config_path.read_text(encoding="utf-8")
-        self.assertNotIn("secret-password", stored)
+        if os.name == "nt":
+            self.assertNotIn("secret-password", stored)
+        else:
+            self.assertEqual(0o600, self.ssh_config_path.stat().st_mode & 0o777)
 
         shown = self.run_cli("ssh", "config", "show")
         self.assertEqual("tester", shown["default"]["username"])
@@ -1030,7 +1033,10 @@ class CcRelayCliTest(unittest.TestCase):
         shown = self.run_cli("ssh", "config", "show")
         stored = self.ssh_config_path.read_text(encoding="utf-8")
         self.assertEqual(1, status["passwordSecretCount"])
-        self.assertNotIn("dedicated-secret", stored)
+        if os.name == "nt":
+            self.assertNotIn("dedicated-secret", stored)
+        else:
+            self.assertEqual(0o600, self.ssh_config_path.stat().st_mode & 0o777)
         self.assertNotIn("dedicated-secret", json.dumps(shown, ensure_ascii=False))
 
     def seed_default_ssh_credential(self):
