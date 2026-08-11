@@ -104,7 +104,9 @@ function Resolve-ClaudeCodeArchive {
         return $resolved
     }
 
-    $claudeCacheRoot = Join-Path $CacheRoot '../claude-code-linux-x64'
+    New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
+    $cacheParent = (Resolve-Path (Join-Path $CacheRoot '..')).Path
+    $claudeCacheRoot = Join-Path $cacheParent 'claude-code-linux-x64'
     New-Item -ItemType Directory -Force -Path $claudeCacheRoot | Out-Null
     $archiveName = "anthropic-ai-claude-code-linux-x64-$Version.tgz"
     $archive = Join-Path $claudeCacheRoot $archiveName
