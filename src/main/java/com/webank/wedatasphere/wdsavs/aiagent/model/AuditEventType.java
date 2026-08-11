@@ -1,0 +1,22 @@
+package com.webank.wedatasphere.wdsavs.aiagent.model;
+
+public enum AuditEventType {
+    ACCESS_REQUESTED,
+    ACCESS_GRANTED,
+    ACCESS_DENIED,
+    GRANT_RENEWED,
+    GRANT_REVOKED,
+    DEPLOY_STARTED,
+    DEPLOY_SUCCEEDED,
+    DEPLOY_FAILED,
+    NODE_REGISTERED,
+    NODE_HEARTBEAT,
+    NODE_UNAVAILABLE,
+    TASK_CREATED,
+    TASK_CANCELLED,
+    A2A_CALLED,
+    ROLLBACK_EXECUTED,
+    CONFIG_UPDATED,
+    CONFIG_UNSET,
+    CONFIG_RELOADED
+}

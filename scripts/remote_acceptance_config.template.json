@@ -1,0 +1,18 @@
+{
+  "centerBaseUrl": "http://127.0.0.1:18191",
+  "sourceNodeId": "source-node:18091",
+  "sourceRelayEndpoint": "http://source-host:18091/api/ai/remote-cc/chat",
+  "sourceHost": "source-host",
+  "sourcePort": 22,
+  "sourceUser": "tester",
+  "targetNodeId": "target-node:18092",
+  "targetHost": "target-host",
+  "targetPort": 22,
+  "targetUser": "tester",
+  "scriptPath": "C:/D/workspace/WDSAVS-dev-skill/scripts/install-relay.sh",
+  "artifactPath": "C:/D/workspace/WDSAVS-dev-skill/build/runtime-bundle/ccrelay",
+  "remoteDirectory": "",
+  "commandArguments": [
+    "--spring.profiles.active=dev"
+  ]
+}

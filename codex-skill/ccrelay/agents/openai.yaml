@@ -1,0 +1,6 @@
+interface:
+  display_name: "CC Relay 运行时"
+  short_description: "自动引导部署并操作远端多 Agent 协作集群环境"
+  default_prompt: "使用 $ccrelay 先完成 SSH 身份确认，再选择自动执行或逐步检视，准备 CC center 与 relay 并运行远端多 Agent 协作任务。"
+policy:
+  allow_implicit_invocation: true

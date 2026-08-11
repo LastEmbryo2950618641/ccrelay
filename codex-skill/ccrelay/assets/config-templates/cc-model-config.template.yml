@@ -1,0 +1,25 @@
+# CC Relay Claude Code 配置模板
+# 使用前必须填充 model、baseUrl、apiKey；不要把真实 apiKey 提交到仓库。
+
+provider: deepseek-anthropic-compatible
+model: ""
+baseUrl: "https://api.deepseek.com/anthropic"
+apiKey: ""
+apiPath: /v1/messages
+
+# relay 通过远端 Claude Code CLI 建立真实 CC 会话。
+relayCommand: claude
+relayArgs:
+  - --bare
+  - --print
+  - --model
+  - deepseek-v4-pro
+  - --effort
+  - low
+
+# 可选参数
+temperature: null
+topP: null
+maxTokens: null
+extraHeaders: {}
+extraBody: {}
