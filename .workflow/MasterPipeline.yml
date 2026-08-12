@@ -1,0 +1,23 @@
+name: ccrelay-release-build
+displayName: 'CC Relay Release Build'
+commitMessage: ''
+stages:
+  - stage:
+      name: build-release-stage
+      displayName: 'Build Release'
+      failFast: true
+      steps:
+        - step: gradlebuild@1
+          name: build-release
+          displayName: 'Build CC Relay release packages'
+          inputs:
+            gradleVersion: '8.5'
+            javaVersion: '21'
+            goals: |
+              chmod +x scripts/gitee_go_build.sh build.sh
+              ./scripts/gitee_go_build.sh
+            uploadArtifact: true
+            uploadArtifactOptions:
+              artifactPath: 'dist/release'
+              artifactRepository: 'ccrelay-release'
+              artifactName: 'ccrelay-release'
