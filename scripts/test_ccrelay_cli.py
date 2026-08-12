@@ -2022,6 +2022,39 @@ class CcRelayCliTest(unittest.TestCase):
             run.call_args.args[0][-1],
         )
 
+    @patch.object(ccrelay_ssh.os, "name", "nt")
+    @patch.object(ccrelay_ssh.subprocess, "run")
+    @patch.object(ccrelay_ssh.shutil, "which", return_value="scp")
+    def test_scp_normalizes_windows_source_separators_for_remote_basenames(self, _which, run):
+        run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        result = ccrelay_ssh._run_scp(
+            "192.0.2.20",
+            22,
+            "ccrelay",
+            [
+                Path(r"C:\Users\tester\.claude\skills\ccrelay\assets\runtime-bundle\ccrelay\app.jar"),
+                Path(r"C:\Users\tester\.claude\skills\ccrelay\assets\runtime-bundle\ccrelay\runtime.tar.gz"),
+            ],
+            "/home/ccrelay/ccrelay/192.0.2.20-18191",
+            30,
+        )
+
+        command = run.call_args.args[0]
+        self.assertTrue(result["success"])
+        self.assertIn(
+            "C:/Users/tester/.claude/skills/ccrelay/assets/runtime-bundle/ccrelay/app.jar",
+            command,
+        )
+        self.assertIn(
+            "C:/Users/tester/.claude/skills/ccrelay/assets/runtime-bundle/ccrelay/runtime.tar.gz",
+            command,
+        )
+        self.assertNotIn(
+            r"C:\Users\tester\.claude\skills\ccrelay\assets\runtime-bundle\ccrelay\app.jar",
+            command,
+        )
+
     @patch.object(ccrelay_center, "run_command", return_value={"success": True, "summary": ""})
     @patch.object(ccrelay_center, "runtime_access", return_value={"username": "ccrelay"})
     def test_center_reachability_checks_non_hosting_target_nodes(self, _access, run_command):

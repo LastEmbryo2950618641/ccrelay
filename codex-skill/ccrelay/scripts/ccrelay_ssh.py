@@ -1269,7 +1269,7 @@ def _run_scp(
             if custom_arguments is None:
                 command.extend(["-o", "IdentitiesOnly=yes"])
             command.extend(["-i", str(key_path)])
-    command.extend(str(item) for item in sources)
+    command.extend(str(item).replace("\\", "/") if os.name == "nt" else str(item) for item in sources)
     command.append(f"{username}@{host}:{remote_directory}")
     started = time.monotonic()
     try:
