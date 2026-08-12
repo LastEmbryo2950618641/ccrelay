@@ -16,7 +16,7 @@ public class SelfReplicateRequest {
     private Integer port = 22;
     private String username;
     private Integer relayPort;
-    private Boolean replaceExistingRelay = false;
+    private Boolean replaceExistingRelay = true;
     private String scriptPath;
     private String artifactPath;
     private String remoteDirectory;

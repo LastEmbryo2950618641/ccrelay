@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -42,15 +43,22 @@ public class CenterSshAccessServiceImpl implements CenterSshAccessService {
         String target = request.getUsername().trim() + "@" + request.getHost().trim();
         long started = System.nanoTime();
         try {
-            Process process = new ProcessBuilder(
-                    sshCommand(),
-                    "-o", "BatchMode=yes",
-                    "-o", "StrictHostKeyChecking=accept-new",
-                    "-o", "ConnectTimeout=" + Math.max(1L, Duration.ofMillis(timeoutMs).toSeconds()),
-                    "-o", "ConnectionAttempts=1",
+            List<String> command = new ArrayList<>();
+            command.add(sshCommand());
+            if (request.getSshArguments() == null || request.getSshArguments().isEmpty()) {
+                command.addAll(List.of(
+                        "-o", "BatchMode=yes",
+                        "-o", "StrictHostKeyChecking=no",
+                        "-o", "ConnectTimeout=" + Math.max(1L, Duration.ofMillis(timeoutMs).toSeconds()),
+                        "-o", "ConnectionAttempts=1"));
+            } else {
+                command.addAll(request.getSshArguments());
+            }
+            command.addAll(List.of(
                     "-p", String.valueOf(port),
                     target,
-                    "printf CCRELAY_CENTER_SSH_OK")
+                    "printf CCRELAY_CENTER_SSH_OK"));
+            Process process = new ProcessBuilder(command)
                     .redirectErrorStream(true)
                     .start();
             boolean completed = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
@@ -108,6 +116,14 @@ public class CenterSshAccessServiceImpl implements CenterSshAccessService {
     private void validate(CenterSshPreflightRequest request) {
         if (request == null || isBlank(request.getHost()) || isBlank(request.getUsername())) {
             throw new IllegalArgumentException("host and username are required for center SSH preflight");
+        }
+        if (request.getSshArguments() != null) {
+            if (request.getSshArguments().size() > 64) {
+                throw new IllegalArgumentException("sshArguments cannot contain more than 64 values");
+            }
+            if (request.getSshArguments().stream().anyMatch(value -> value == null || value.indexOf('\0') >= 0)) {
+                throw new IllegalArgumentException("sshArguments cannot contain null values or NUL characters");
+            }
         }
     }
 

@@ -26,5 +26,7 @@ spring:
 
 wdsavs:
   ai:
+    skill:
+      directory: ${CCRELAY_SKILL_DIR:./skills}
     task:
       recover-on-startup: true

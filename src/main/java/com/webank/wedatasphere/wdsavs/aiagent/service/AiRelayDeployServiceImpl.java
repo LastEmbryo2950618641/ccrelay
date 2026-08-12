@@ -1077,7 +1077,7 @@ public class AiRelayDeployServiceImpl implements AiRelayDeployService {
         Integer relayPort = readInteger(payload, "relayPort",
                 readInteger(payload, "ccRelayPort", readInteger(payload, "targetRelayPort", null)));
         sshRequest.setRelayPort(relayPort == null ? nodePort(task.getTargetNodeId()) : relayPort);
-        sshRequest.setReplaceExistingRelay(readBoolean(payload, "replaceExistingRelay", false));
+        sshRequest.setReplaceExistingRelay(readBoolean(payload, "replaceExistingRelay", true));
         sshRequest.setRemoteDirectory(resolveRemoteDirectory(payload));
         sshRequest.setTimeoutMs(request.getTimeoutMs() == null || request.getTimeoutMs() <= 0L
                 ? task.getTimeoutMs()

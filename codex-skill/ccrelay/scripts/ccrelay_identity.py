@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import json
 import os
 import re
@@ -10,7 +11,7 @@ import shlex
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 import ccrelay_ssh
 
@@ -19,12 +20,47 @@ DEFAULT_CLUSTER_ID = "default"
 DEFAULT_DEDICATED_USERNAME = "ccrelay"
 DEFAULT_PRODUCT_NAME = "ccrelay"
 DEFAULT_REMOTE_DIRECTORY_TEMPLATE = "/home/${runtimeUser}/${productName}/${host}-${relayPort}"
+DEFAULT_SSH_CONCURRENCY = 4
+MAX_SSH_CONCURRENCY = 32
 POSIX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEDICATED_USERNAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 TEMPLATE_VARIABLE_PATTERN = re.compile(r"\$\{([A-Za-z][A-Za-z0-9]*)}")
 ALLOWED_TEMPLATE_VARIABLES = {
     "bootstrapUser", "runtimeUser", "sshUser", "productName", "host", "relayPort",
 }
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def normalize_concurrency(value: Any) -> int:
+    try:
+        concurrency = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ccrelay_ssh.SshCredentialError("--concurrency 必须是 1 到 32 的整数") from exc
+    if concurrency < 1 or concurrency > MAX_SSH_CONCURRENCY:
+        raise ccrelay_ssh.SshCredentialError("--concurrency 必须是 1 到 32 的整数")
+    return concurrency
+
+
+def parallel_map_ordered(items: Iterable[T], operation: Callable[[T], R], concurrency: int,
+                         on_error: Optional[Callable[[T, Exception], R]] = None) -> List[R]:
+    values = list(items)
+    if not values:
+        return []
+    worker_count = min(normalize_concurrency(concurrency), len(values))
+
+    def execute(item: T) -> R:
+        try:
+            return operation(item)
+        except Exception as exc:
+            if on_error is None:
+                raise
+            return on_error(item, exc)
+
+    if worker_count == 1:
+        return [execute(item) for item in values]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        return list(executor.map(execute, values))
 
 
 def parse_node(value: str) -> Dict[str, Any]:
@@ -49,14 +85,204 @@ def parse_node(value: str) -> Dict[str, Any]:
 def normalize_nodes(values: Iterable[str], center_node: Optional[str] = None) -> List[Dict[str, Any]]:
     nodes: Dict[str, Dict[str, Any]] = {}
     for value in values or []:
-        node = parse_node(value)
-        nodes[node["nodeKey"]] = node
+        for item in str(value).split(","):
+            if not item.strip():
+                continue
+            node = parse_node(item.strip())
+            nodes[node["nodeKey"]] = node
     if center_node:
         node = parse_node(center_node)
         nodes[node["nodeKey"]] = node
     if not nodes:
         raise ccrelay_ssh.SshCredentialError("至少需要一个 --node；中心节点可用 --center-node 指定")
     return list(nodes.values())
+
+
+def node_record(node: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "host": node["host"],
+        "port": int(node.get("port") or 22),
+        "nodeKey": node.get("nodeKey") or ccrelay_ssh.node_key(node["host"], node.get("port") or 22),
+        "username": node.get("username") or node.get("bootstrapUsername"),
+    }
+
+
+def node_values(nodes: Iterable[Dict[str, Any]]) -> List[str]:
+    values = []
+    for node in nodes or []:
+        username = node.get("username") or node.get("bootstrapUsername")
+        value = f"{node['host']}:{int(node.get('port') or 22)}"
+        values.append(value + (f"={username}" if username else ""))
+    return values
+
+
+def active_target_nodes(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    current = config if config is not None else ccrelay_ssh.load_config()
+    identity = current.get("clusterIdentity") or {}
+    excluded = {
+        str(item.get("nodeKey") or "")
+        for item in identity.get("excludedNodes") or []
+        if isinstance(item, dict)
+    }
+    return [
+        node_record(item)
+        for item in identity.get("targetNodes") or []
+        if isinstance(item, dict) and item.get("host") and item.get("nodeKey") not in excluded
+    ]
+
+
+def resolve_target_nodes(cluster_id: str, values: Iterable[str], center_node: Optional[str] = None,
+                         initialize: bool = True) -> List[Dict[str, Any]]:
+    supplied_values = list(values or [])
+    supplied = normalize_nodes(supplied_values) if supplied_values else []
+    config = ccrelay_ssh.load_config()
+    identity = config.setdefault("clusterIdentity", {})
+    persisted = active_target_nodes(config)
+    if not identity.get("targetNodes"):
+        if not supplied:
+            raise ccrelay_ssh.SshCredentialError("尚未保存部署目标节点，请先通过 bootstrap next --node 指定完整节点集合")
+        if not initialize:
+            raise ccrelay_ssh.SshCredentialError("尚未保存部署目标节点")
+        identity.update({
+            "clusterId": cluster_id,
+            "targetNodes": [node_record(item) for item in supplied],
+            "excludedNodes": [],
+            "failedNodes": [],
+        })
+        ccrelay_ssh.save_config(config)
+        persisted = active_target_nodes(config)
+    elif supplied:
+        persisted_keys = {item["nodeKey"] for item in persisted}
+        unknown = [item["nodeKey"] for item in supplied if item["nodeKey"] not in persisted_keys]
+        if unknown:
+            raise ccrelay_ssh.SshCredentialError(
+                "命令包含尚未加入部署目标集合的节点: " + ", ".join(unknown)
+                + "；请先使用 ssh identity targets add 显式加入")
+    if not persisted:
+        raise ccrelay_ssh.SshCredentialError("当前部署目标集合为空；请先显式加入节点")
+    if center_node:
+        center_key = parse_node(center_node)["nodeKey"]
+        if center_key not in {item["nodeKey"] for item in persisted}:
+            raise ccrelay_ssh.SshCredentialError("中心节点必须属于当前部署目标集合: " + center_key)
+    return persisted
+
+
+def update_target_nodes(cluster_id: str, values: Iterable[str], action: str,
+                        confirmed: bool = False) -> Dict[str, Any]:
+    requested = normalize_nodes(values)
+    config = ccrelay_ssh.load_config()
+    identity = config.setdefault("clusterIdentity", {})
+    targets = {
+        item["nodeKey"]: node_record(item)
+        for item in identity.get("targetNodes") or []
+        if isinstance(item, dict) and item.get("host")
+    }
+    excluded = {
+        item["nodeKey"]: node_record(item)
+        for item in identity.get("excludedNodes") or []
+        if isinstance(item, dict) and item.get("host")
+    }
+    normalized_action = str(action or "").upper()
+    if normalized_action == "ADD":
+        for item in requested:
+            record = node_record(item)
+            targets[record["nodeKey"]] = record
+            excluded.pop(record["nodeKey"], None)
+    elif normalized_action == "EXCLUDE":
+        if not confirmed:
+            raise ccrelay_ssh.SshCredentialError("排除部署目标节点必须显式传入 --confirm true")
+        unknown = [item["nodeKey"] for item in requested if item["nodeKey"] not in targets]
+        if unknown:
+            raise ccrelay_ssh.SshCredentialError("无法排除未登记的目标节点: " + ", ".join(unknown))
+        for item in requested:
+            excluded[item["nodeKey"]] = targets[item["nodeKey"]]
+    else:
+        raise ccrelay_ssh.SshCredentialError("不支持的目标集合操作: " + str(action))
+    identity.update({
+        "clusterId": cluster_id,
+        "targetNodes": list(targets.values()),
+        "excludedNodes": list(excluded.values()),
+    })
+    failed_keys = {item["nodeKey"] for item in active_target_nodes(config)}
+    identity["failedNodes"] = [
+        item for item in identity.get("failedNodes") or []
+        if isinstance(item, dict) and item.get("nodeKey") in failed_keys
+    ]
+    ccrelay_ssh.save_config(config)
+    return target_status(cluster_id, config)
+
+
+def target_status(cluster_id: str = DEFAULT_CLUSTER_ID,
+                  config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    current = config if config is not None else ccrelay_ssh.load_config()
+    identity = current.get("clusterIdentity") or {}
+    targets = [
+        node_record(item) for item in identity.get("targetNodes") or []
+        if isinstance(item, dict) and item.get("host")
+    ]
+    active = active_target_nodes(current)
+    return {
+        "clusterId": identity.get("clusterId", cluster_id),
+        "targetNodeCount": len(targets),
+        "activeTargetNodeCount": len(active),
+        "managedNodeCount": len(identity.get("managedNodes") or []),
+        "failedNodeCount": len(identity.get("failedNodes") or []),
+        "excludedNodeCount": len(identity.get("excludedNodes") or []),
+        "targetNodes": targets,
+        "activeTargetNodes": active,
+        "failedNodes": identity.get("failedNodes") or [],
+        "excludedNodes": identity.get("excludedNodes") or [],
+    }
+
+
+def persist_failed_nodes(failures: Iterable[Dict[str, Any]]) -> None:
+    config = ccrelay_ssh.load_config()
+    identity = config.setdefault("clusterIdentity", {})
+    active = {item["nodeKey"]: item for item in active_target_nodes(config)}
+    records = []
+    for failure in failures or []:
+        key = failure.get("nodeKey") or failure.get("node")
+        target = active.get(str(key))
+        if not target:
+            continue
+        records.append({
+            **target,
+            "failureType": failure.get("failureType") or "SSH_CONNECTION_FAILED",
+            "summary": failure.get("summary") or "SSH 连接验证失败",
+        })
+    identity["failedNodes"] = records
+    ccrelay_ssh.save_config(config)
+
+
+def persist_identity_outcome(state: Dict[str, Any]) -> None:
+    config = ccrelay_ssh.load_config()
+    identity = config.setdefault("clusterIdentity", {})
+    active = {item["nodeKey"]: item for item in active_target_nodes(config)}
+    successful = []
+    failed = []
+    allow_create = bool(state.get("dedicatedAccountCreationAllowed"))
+    by_key = {item.get("nodeKey"): item for item in state.get("nodes") or []}
+    for key, target in active.items():
+        item = by_key.get(key) or {}
+        ready = item.get("centerAccessStatus") == "READY"
+        if allow_create:
+            ready = ready and item.get("accountStatus") == "ACTIVE"
+        if ready:
+            successful.append({
+                **target,
+                "bootstrapUsername": item.get("bootstrapUsername") or target.get("username"),
+                "runtimeUsername": item.get("runtimeUsername"),
+                "osType": item.get("osType"),
+            })
+        else:
+            failed.append({
+                **target,
+                "failureType": item.get("lastErrorCode") or "IDENTITY_NOT_READY",
+                "summary": item.get("lastErrorSummary") or "节点身份或互信尚未验证完成",
+            })
+    identity["managedNodes"] = successful
+    identity["failedNodes"] = failed
+    ccrelay_ssh.save_config(config)
 
 
 def local_status(cluster_id: str = DEFAULT_CLUSTER_ID) -> Dict[str, Any]:
@@ -81,26 +307,31 @@ def local_status(cluster_id: str = DEFAULT_CLUSTER_ID) -> Dict[str, Any]:
 
 def plan(cluster_id: str, center_node: str, node_values: Iterable[str], allow_create: bool,
          dedicated_username: str, timeout_seconds: int,
-         remote_directory_template: Optional[str] = None) -> Dict[str, Any]:
+         remote_directory_template: Optional[str] = None,
+         concurrency: int = DEFAULT_SSH_CONCURRENCY) -> Dict[str, Any]:
     dedicated_username = normalize_dedicated_username(dedicated_username)
     directory_template = normalize_remote_directory_template(remote_directory_template)
     nodes = normalize_nodes(node_values, center_node)
-    node_results = []
-    for node in nodes:
+    concurrency = normalize_concurrency(concurrency)
+
+    def probe_node(node: Dict[str, Any]) -> Dict[str, Any]:
         result = ccrelay_ssh.probe_connection(node["host"], node["port"], node.get("username"), timeout_seconds)
         selected_username = result.get("username") or node.get("username")
         capability = probe_environment(node, selected_username, timeout_seconds, dedicated_username) if result.get("success") else {
             "osType": "UNKNOWN", "canCreateAccount": False, "canInstallKey": False,
             "summary": result.get("summary"),
         }
-        node_results.append({
+        return {
             **node,
             "bootstrapSuccess": bool(result.get("success")),
             "bootstrapCredentialScope": result.get("credentialScope"),
             "bootstrapUsername": selected_username,
             "bootstrapStatus": result.get("status"),
+            "bootstrapFailureType": result.get("failureType"),
             "accountStatus": "CONFLICT" if allow_create and capability.get("dedicatedAccountConflict")
             else "ACTIVE" if allow_create and capability.get("dedicatedAccountManaged")
+            else "UNVERIFIED" if allow_create and capability.get("dedicatedExists") == "true"
+            and capability.get("dedicatedInspection") == "INACCESSIBLE"
             else "PLANNED" if allow_create and capability.get("canCreateAccount") else "EXISTING",
             "runtimeUsername": dedicated_username if allow_create else selected_username,
             "osType": capability.get("osType", "UNKNOWN"),
@@ -109,10 +340,31 @@ def plan(cluster_id: str, center_node: str, node_values: Iterable[str], allow_cr
             "privilegeSummary": capability,
             "lastErrorSummary": "同名专用账号已存在但不是 Skill 受管账号" if capability.get("dedicatedAccountConflict")
             else None if result.get("success") else result.get("summary"),
-        })
+        }
+
+    def probe_error(node: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+        return {
+            **node,
+            "bootstrapSuccess": False,
+            "bootstrapUsername": node.get("username"),
+            "bootstrapStatus": "FAILED",
+            "bootstrapFailureType": "SSH_PROBE_FAILED",
+            "accountStatus": "PLANNED" if allow_create else "EXISTING",
+            "runtimeUsername": dedicated_username if allow_create else node.get("username"),
+            "osType": "UNKNOWN",
+            "canCreateAccount": False,
+            "canInstallKey": False,
+            "privilegeSummary": {"osType": "UNKNOWN", "summary": str(exc)},
+            "lastErrorSummary": str(exc),
+        }
+
+    node_results = parallel_map_ordered(nodes, probe_node, concurrency, probe_error)
     failures = [item for item in node_results if not item.get("bootstrapSuccess")]
-    permission_failures = [item for item in node_results if allow_create and (
-        not item.get("canCreateAccount") or item.get("privilegeSummary", {}).get("dedicatedAccountConflict"))]
+    permission_failures = [item for item in node_results if allow_create and item.get("bootstrapSuccess") and (
+        (not item.get("canCreateAccount")
+         and not (item.get("privilegeSummary", {}).get("dedicatedExists") == "true"
+                  and item.get("privilegeSummary", {}).get("dedicatedInspection") == "INACCESSIBLE"))
+        or item.get("privilegeSummary", {}).get("dedicatedAccountConflict"))]
     return {
         "clusterId": cluster_id,
         "accountMode": "DEDICATED_MANAGED" if allow_create else "EXISTING_ACCOUNT",
@@ -132,11 +384,13 @@ def plan(cluster_id: str, center_node: str, node_values: Iterable[str], allow_cr
 
 def apply(cluster_id: str, center_node: str, node_values: Iterable[str], allow_create: bool,
            dedicated_username: str, timeout_seconds: int, rotate_key: bool = False,
-           remote_directory_template: Optional[str] = None) -> Dict[str, Any]:
+           remote_directory_template: Optional[str] = None,
+           concurrency: int = DEFAULT_SSH_CONCURRENCY) -> Dict[str, Any]:
     dedicated_username = normalize_dedicated_username(dedicated_username)
     directory_template = normalize_remote_directory_template(remote_directory_template)
+    concurrency = normalize_concurrency(concurrency)
     planned = plan(cluster_id, center_node, node_values, allow_create, dedicated_username, timeout_seconds,
-                   directory_template)
+                   directory_template, concurrency)
     if planned["status"] != "READY_TO_APPLY":
         return planned
     nodes = normalize_nodes(node_values, center_node)
@@ -145,9 +399,20 @@ def apply(cluster_id: str, center_node: str, node_values: Iterable[str], allow_c
         key = ensure_cluster_key(cluster_id, rotate_key)
         cluster_key_path = key
         public_key = key.with_suffix(".pub").read_text(encoding="utf-8").strip()
-        for item in planned["nodes"]:
-            password = dedicated_password(cluster_id, item["nodeKey"], False)
-            result = provision_dedicated(item, dedicated_username, password, public_key, key, timeout_seconds)
+        passwords = {
+            item["nodeKey"]: dedicated_password(cluster_id, item["nodeKey"], False)
+            for item in planned["nodes"]
+        }
+
+        def provision_node(source: Dict[str, Any]) -> Dict[str, Any]:
+            item = dict(source)
+            password = passwords[item["nodeKey"]]
+            result = None
+            if ((item.get("privilegeSummary") or {}).get("dedicatedExists") == "true"
+                    and (item.get("privilegeSummary") or {}).get("dedicatedInspection") == "INACCESSIBLE"):
+                result = verify_dedicated_login(item, dedicated_username, password, key, timeout_seconds)
+            if not result or not result.get("success"):
+                result = provision_dedicated(item, dedicated_username, password, public_key, key, timeout_seconds)
             item["applyResult"] = result
             if not result.get("success"):
                 item["accountStatus"] = "FAILED"
@@ -156,6 +421,15 @@ def apply(cluster_id: str, center_node: str, node_values: Iterable[str], allow_c
                 item["accountStatus"] = "ACTIVE"
                 item["runtimeUsername"] = dedicated_username
                 item["keyInstallStatus"] = "READY"
+            return item
+
+        def provision_error(item: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+            return {**item, "accountStatus": "FAILED", "keyInstallStatus": "FAILED",
+                    "lastErrorSummary": str(exc),
+                    "applyResult": {"success": False, "summary": str(exc)}}
+
+        planned["nodes"] = parallel_map_ordered(
+            planned["nodes"], provision_node, concurrency, provision_error)
         key_fingerprint = fingerprint(public_key)
         cluster_key_mode = "SHARED_KEYPAIR"
     else:
@@ -166,32 +440,31 @@ def apply(cluster_id: str, center_node: str, node_values: Iterable[str], allow_c
             return {**planned, "status": "FAILED", "failureType": "CENTER_KEY_FAILED", "summary": key_result.get("summary")}
         key_fingerprint = key_result.get("fingerprint")
         cluster_key_mode = "CENTER_ONLY_KEYPAIR"
-        for item in planned["nodes"]:
+        def install_center_key(source: Dict[str, Any]) -> Dict[str, Any]:
+            item = dict(source)
             if item["nodeKey"] == center["nodeKey"]:
                 item["keyInstallStatus"] = "CENTER_LOCAL"
-                continue
+                return item
             installed = ccrelay_ssh.bootstrap_public_key_value(
                 item["host"], item["port"], item.get("bootstrapUsername"), key_result["publicKey"], timeout_seconds)
             item["applyResult"] = installed
             item["keyInstallStatus"] = "READY" if installed.get("success") else "FAILED"
             item["lastErrorSummary"] = None if installed.get("success") else installed.get("summary")
-    verified = verify(cluster_id, center_node, planned["nodes"], allow_create, dedicated_username, timeout_seconds,
-                      key_fingerprint, cluster_key_mode)
+            return item
+
+        def install_error(item: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+            return {**item, "keyInstallStatus": "FAILED", "lastErrorSummary": str(exc),
+                    "applyResult": {"success": False, "summary": str(exc)}}
+
+        planned["nodes"] = parallel_map_ordered(
+            planned["nodes"], install_center_key, concurrency, install_error)
+    verified = verify(
+        cluster_id, center_node, planned["nodes"], allow_create, dedicated_username, timeout_seconds,
+        key_fingerprint, cluster_key_mode, concurrency, expected_target_nodes=nodes)
     config = ccrelay_ssh.load_config()
     identity = config.setdefault("clusterIdentity", {})
     identity.update({"clusterId": cluster_id, "selectionRequired": False, "accountMode": planned["accountMode"],
                      "dedicatedAccountCreationAllowed": allow_create,
-                     "managedNodes": [
-                         {
-                             "host": item["host"],
-                             "port": item["port"],
-                             "nodeKey": item["nodeKey"],
-                             "bootstrapUsername": item.get("bootstrapUsername"),
-                             "runtimeUsername": item.get("runtimeUsername"),
-                             "osType": item.get("osType"),
-                         }
-                         for item in planned["nodes"]
-                     ],
                      "identityCenterNodeId": planned.get("centerNodeId")})
     dedicated = identity.setdefault("dedicatedAccount", {})
     dedicated.update({"username": dedicated_username, "status": dedicated_account_status(verified, allow_create),
@@ -205,6 +478,7 @@ def apply(cluster_id: str, center_node: str, node_values: Iterable[str], allow_c
     else:
         dedicated["clusterKey"] = {"mode": cluster_key_mode, "fingerprint": key_fingerprint}
     ccrelay_ssh.save_config(config)
+    persist_identity_outcome(verified)
     return {**verified, "plan": planned, "local": local_status(cluster_id)}
 
 
@@ -221,8 +495,13 @@ def dedicated_account_status(state: Dict[str, Any], allow_create: bool) -> str:
 
 def verify(cluster_id: str, center_node: str, nodes: List[Dict[str, Any]], allow_create: bool,
            dedicated_username: str, timeout_seconds: int, key_fingerprint: Optional[str] = None,
-           cluster_key_mode: Optional[str] = None) -> Dict[str, Any]:
-    for item in nodes:
+           cluster_key_mode: Optional[str] = None,
+           concurrency: int = DEFAULT_SSH_CONCURRENCY,
+           expected_target_nodes: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    concurrency = normalize_concurrency(concurrency)
+    dedicated_key = ensure_cluster_key(cluster_id, False) if allow_create else None
+    def enrich_node(source: Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(source)
         if not item.get("bootstrapUsername"):
             credential, scope = ccrelay_ssh.resolve_credential(item["host"], item["port"])
             item["bootstrapUsername"] = item.get("username") or (credential or {}).get("username")
@@ -231,11 +510,17 @@ def verify(cluster_id: str, center_node: str, nodes: List[Dict[str, Any]], allow
             item["privilegeSummary"] = probe_environment(
                 item, item["bootstrapUsername"], timeout_seconds, dedicated_username)
         item.setdefault("runtimeUsername", dedicated_username if allow_create else item.get("bootstrapUsername"))
+        return item
+
+    def enrich_error(item: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+        return {**item, "runtimeUsername": dedicated_username if allow_create else item.get("bootstrapUsername"),
+                "privilegeSummary": {"osType": "UNKNOWN", "summary": str(exc)}}
+
+    nodes = parallel_map_ordered(nodes, enrich_node, concurrency, enrich_error)
     center = parse_node(center_node)
     center_item = next((item for item in nodes if item["nodeKey"] == center["nodeKey"]), None)
     center_user = (center_item or {}).get("bootstrapUsername") or center.get("username")
-    node_results = []
-    for item in nodes:
+    def verify_center_access(item: Dict[str, Any]) -> Dict[str, Any]:
         if item["nodeKey"] == center["nodeKey"]:
             item_result = dict(item)
             item_result["centerAccessStatus"] = "READY"
@@ -244,40 +529,92 @@ def verify(cluster_id: str, center_node: str, nodes: List[Dict[str, Any]], allow
                 "status": "CENTER_NODE_LOCAL",
                 "summary": "中心节点本机不执行自我 SSH 验证",
             }
-            node_results.append(item_result)
-            continue
+            return item_result
         runtime_user = dedicated_username if allow_create else item.get("bootstrapUsername")
+        center_ssh_arguments = ccrelay_ssh.ssh_arguments_for(center["host"], center["port"])
         command = center_verify_command(
-            item, runtime_user, allow_create, (center_item or {}).get("privilegeSummary"), center_user)
+            item, runtime_user, allow_create, (center_item or {}).get("privilegeSummary"), center_user,
+            center_ssh_arguments)
         center_probe = ccrelay_ssh.run_authenticated_command(
             center["host"], center["port"], center_user, command, timeout_seconds)
+        if (allow_create and not center_probe.get("success")
+                and center_user != dedicated_username and dedicated_key is not None):
+            direct_command = center_verify_command(
+                item, runtime_user, True, (center_item or {}).get("privilegeSummary"),
+                dedicated_username, center_ssh_arguments)
+            center_probe = ccrelay_ssh.run_key_command(
+                center["host"], center["port"], dedicated_username, dedicated_key,
+                direct_command, timeout_seconds)
         item_result = dict(item)
         item_result["centerAccessStatus"] = "READY" if center_probe.get("success") else "FAILED"
         item_result["centerProbe"] = center_probe
-        node_results.append(item_result)
-    edges = []
+        return item_result
+
+    def center_access_error(item: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+        return {**item, "centerAccessStatus": "FAILED",
+                "centerProbe": {"success": False, "status": "FAILED", "summary": str(exc)}}
+
+    node_results = parallel_map_ordered(
+        nodes, verify_center_access, concurrency, center_access_error)
+    edges: List[Dict[str, Any]] = []
     if allow_create:
-        for source in nodes:
-            for target in nodes:
-                if source["nodeKey"] == target["nodeKey"]:
-                    continue
-                source_user = source.get("bootstrapUsername")
-                command = node_verify_command(
-                    target, dedicated_username, source.get("privilegeSummary"), source_user)
-                probe = ccrelay_ssh.run_authenticated_command(source["host"], source["port"], source_user, command, timeout_seconds)
-                edges.append({"sourceNodeKey": source["nodeKey"], "targetNodeKey": target["nodeKey"],
-                              "runtimeUsername": dedicated_username, "keyFingerprint": key_fingerprint,
-                              "status": "READY" if probe.get("success") else "FAILED",
-                              "latencyMs": probe.get("latencyMs"), "lastErrorSummary": probe.get("summary")})
+        edge_pairs = [(source, target) for source in nodes for target in nodes
+                      if source["nodeKey"] != target["nodeKey"]]
+
+        def verify_edge(pair: Tuple[Dict[str, Any], Dict[str, Any]]) -> Dict[str, Any]:
+            source, target = pair
+            source_user = source.get("bootstrapUsername")
+            source_ssh_arguments = ccrelay_ssh.ssh_arguments_for(source["host"], source["port"])
+            command = node_verify_command(
+                target, dedicated_username, source.get("privilegeSummary"), source_user,
+                source_ssh_arguments)
+            probe = ccrelay_ssh.run_authenticated_command(
+                source["host"], source["port"], source_user, command, timeout_seconds)
+            if (not probe.get("success") and source_user != dedicated_username
+                    and dedicated_key is not None):
+                direct_command = node_verify_command(
+                    target, dedicated_username, source.get("privilegeSummary"),
+                    dedicated_username, source_ssh_arguments)
+                probe = ccrelay_ssh.run_key_command(
+                    source["host"], source["port"], dedicated_username, dedicated_key,
+                    direct_command, timeout_seconds)
+            return {"sourceNodeKey": source["nodeKey"], "targetNodeKey": target["nodeKey"],
+                    "runtimeUsername": dedicated_username, "keyFingerprint": key_fingerprint,
+                    "status": "READY" if probe.get("success") else "FAILED",
+                    "latencyMs": probe.get("latencyMs"), "lastErrorSummary": probe.get("summary")}
+
+        def edge_error(pair: Tuple[Dict[str, Any], Dict[str, Any]], exc: Exception) -> Dict[str, Any]:
+            source, target = pair
+            return {"sourceNodeKey": source["nodeKey"], "targetNodeKey": target["nodeKey"],
+                    "runtimeUsername": dedicated_username, "keyFingerprint": key_fingerprint,
+                    "status": "FAILED", "latencyMs": None, "lastErrorSummary": str(exc)}
+
+        edges = parallel_map_ordered(edge_pairs, verify_edge, concurrency, edge_error)
     center_ready = bool(node_results) and all(item["centerAccessStatus"] == "READY" for item in node_results)
-    mesh_ready = bool(edges) and all(edge["status"] == "READY" for edge in edges)
-    capability = "FULL_MESH" if center_ready and (mesh_ready or len(nodes) <= 1 and allow_create) else "CENTER_ONLY" if center_ready else "DEGRADED"
+    expected_node_keys = {
+        item["nodeKey"] for item in (expected_target_nodes if expected_target_nodes is not None else nodes)
+    }
+    verified_node_keys = {
+        item["nodeKey"] for item in node_results if item.get("centerAccessStatus") == "READY"
+    }
+    expected_edges = {
+        (source, target) for source in expected_node_keys for target in expected_node_keys if source != target
+    }
+    verified_edges = {
+        (edge.get("sourceNodeKey"), edge.get("targetNodeKey"))
+        for edge in edges if edge.get("status") == "READY"
+    }
+    center_ready = bool(expected_node_keys) and verified_node_keys == expected_node_keys
+    mesh_ready = bool(allow_create) and verified_edges == expected_edges
+    capability = "FULL_MESH" if center_ready and mesh_ready else "CENTER_ONLY" if center_ready else "DEGRADED"
     return {"clusterId": cluster_id, "accountMode": "DEDICATED_MANAGED" if allow_create else "EXISTING_ACCOUNT",
             "dedicatedAccountCreationAllowed": allow_create, "dedicatedUsername": dedicated_username,
             "centerNodeId": center["nodeKey"], "centerToNodeStatus": "READY" if center_ready else "PARTIAL",
             "nodeToNodeStatus": "READY" if mesh_ready else "NOT_REQUIRED" if not allow_create else "PARTIAL",
             "effectiveCapability": capability, "clusterKeyMode": cluster_key_mode,
             "clusterKeyFingerprint": key_fingerprint, "nodes": node_results, "trustEdges": edges,
+            "targetNodeCount": len(expected_node_keys), "verifiedNodeCount": len(verified_node_keys),
+            "expectedTrustEdgeCount": len(expected_edges), "verifiedTrustEdgeCount": len(verified_edges),
             "lastVerifiedTime": str(int(time.time() * 1000))}
 
 
@@ -297,7 +634,8 @@ def probe_environment(node: Dict[str, Any], username: Optional[str], timeout_sec
         parsed["canInstallKey"] = parsed.get("mkdirPath") is not None
         parsed["dedicatedAccountManaged"] = parsed.get("dedicatedManaged") == "true"
         parsed["dedicatedAccountConflict"] = (
-            parsed.get("dedicatedExists") == "true" and not parsed["dedicatedAccountManaged"])
+            parsed.get("dedicatedExists") == "true"
+            and parsed.get("dedicatedInspection") == "UNMANAGED")
         return parsed
     windows = ccrelay_ssh.run_authenticated_command(
         node["host"], node["port"], username,
@@ -305,11 +643,19 @@ def probe_environment(node: Dict[str, Any], username: Optional[str], timeout_sec
         timeout_seconds, include_output=True)
     parsed = parse_capability(windows, "WINDOWS")
     if parsed.get("success"):
-        parsed["canCreateAccount"] = str(parsed.get("admin")).lower() == "true"
-        parsed["canInstallKey"] = str(parsed.get("admin")).lower() == "true"
+        is_admin = str(parsed.get("admin")).lower() == "true"
+        account_exists = str(parsed.get("dedicatedExists")).lower() == "true"
+        parsed["canCreateAccount"] = is_admin
+        parsed["canInstallKey"] = is_admin
         parsed["dedicatedAccountManaged"] = str(parsed.get("dedicatedManaged")).lower() == "true"
+        parsed["dedicatedInspection"] = (
+            "NOT_FOUND" if not account_exists
+            else "VERIFIED" if parsed["dedicatedAccountManaged"]
+            else "UNMANAGED" if is_admin
+            else "INACCESSIBLE")
         parsed["dedicatedAccountConflict"] = (
-            str(parsed.get("dedicatedExists")).lower() == "true" and not parsed["dedicatedAccountManaged"])
+            account_exists
+            and str(parsed.get("dedicatedInspection")).upper() == "UNMANAGED")
     return parsed
 
 
@@ -335,6 +681,7 @@ if [ -z \"$account_tool_path\" ]; then account_tool_path=$adduser_path; fi
 getent_path=$(command -v getent 2>/dev/null || true)
 dedicated_exists=false
 dedicated_managed=false
+dedicated_inspection=NOT_FOUND
 if id -u {quoted_username} >/dev/null 2>&1; then
   dedicated_exists=true
   if [ -n \"$getent_path\" ]; then
@@ -343,22 +690,35 @@ if id -u {quoted_username} >/dev/null 2>&1; then
     dedicated_home=$(awk -F: '$1 == \"{dedicated_username}\" {{ print $6; exit }}' /etc/passwd)
   fi
   if [ \"$uid\" = 0 ]; then
+    dedicated_inspection=VERIFIED
     if [ -f \"$dedicated_home/.ssh/.ccrelay-managed\" ] || [ -f \"$dedicated_home/.ssh/id_ed25519_ccrelay_cluster\" ]; then
       dedicated_managed=true
+    else
+      dedicated_inspection=UNMANAGED
     fi
-  elif [ \"$sudo_ok\" = true ] && [ -n \"$sudo_path\" ]; then
+  elif [ -n \"$sudo_path\" ] && \"$sudo_path\" -n test -d \"$dedicated_home\" >/dev/null 2>&1; then
+    dedicated_inspection=VERIFIED
     if \"$sudo_path\" -n test -f \"$dedicated_home/.ssh/.ccrelay-managed\" || \"$sudo_path\" -n test -f \"$dedicated_home/.ssh/id_ed25519_ccrelay_cluster\"; then
       dedicated_managed=true
+    else
+      dedicated_inspection=UNMANAGED
     fi
-  elif [ -f \"$dedicated_home/.ssh/.ccrelay-managed\" ] || [ -f \"$dedicated_home/.ssh/id_ed25519_ccrelay_cluster\" ]; then
-    dedicated_managed=true
+  elif [ -d \"$dedicated_home\" ] && [ -x \"$dedicated_home\" ]; then
+    dedicated_inspection=VERIFIED
+    if [ -f \"$dedicated_home/.ssh/.ccrelay-managed\" ] || [ -f \"$dedicated_home/.ssh/id_ed25519_ccrelay_cluster\" ]; then
+      dedicated_managed=true
+    else
+      dedicated_inspection=UNMANAGED
+    fi
+  else
+    dedicated_inspection=INACCESSIBLE
   fi
 fi
-printf 'CCRELAY_CAP|os=LINUX|uid=%s|sudo=%s|sudoPath=%s|bashPath=%s|shPath=%s|shellPath=%s|runuserPath=%s|suPath=%s|sshPath=%s|mkdirPath=%s|getentPath=%s|accountToolPath=%s|chpasswdPath=%s|dedicatedExists=%s|dedicatedManaged=%s' \
+printf 'CCRELAY_CAP|os=LINUX|uid=%s|sudo=%s|sudoPath=%s|bashPath=%s|shPath=%s|shellPath=%s|runuserPath=%s|suPath=%s|sshPath=%s|mkdirPath=%s|getentPath=%s|accountToolPath=%s|chpasswdPath=%s|dedicatedExists=%s|dedicatedManaged=%s|dedicatedInspection=%s' \
   \"$uid\" \"$sudo_ok\" \"$sudo_path\" \"$bash_path\" \"$sh_path\" \"$shell_path\" \
   \"$(command -v runuser 2>/dev/null || true)\" \"$(command -v su 2>/dev/null || true)\" \
   \"$(command -v ssh 2>/dev/null || true)\" \"$(command -v mkdir 2>/dev/null || true)\" \"$getent_path\" \
-  \"$account_tool_path\" \"$(command -v chpasswd 2>/dev/null || true)\" \"$dedicated_exists\" \"$dedicated_managed\""""
+  \"$account_tool_path\" \"$(command -v chpasswd 2>/dev/null || true)\" \"$dedicated_exists\" \"$dedicated_managed\" \"$dedicated_inspection\""""
 
 
 def parse_capability(result: Dict[str, Any], default_os: str) -> Dict[str, Any]:
@@ -453,6 +813,21 @@ def dedicated_password(cluster_id: str, node_key: str, rotate: bool = False) -> 
         secrets_map[node_key] = ccrelay_ssh.protect_secret(ccrelay_ssh.random_secret())
         ccrelay_ssh.save_config(config)
     return ccrelay_ssh.unprotect_secret(secrets_map[node_key])
+
+
+def verify_dedicated_login(node: Dict[str, Any], username: str, password: str,
+                           private_key: Path, timeout_seconds: int) -> Dict[str, Any]:
+    key_result = ccrelay_ssh.run_key_command(
+        node["host"], node["port"], username, private_key,
+        "printf CCRELAY_DEDICATED_READY", timeout_seconds)
+    if key_result.get("success"):
+        return {**key_result, "status": "DEDICATED_LOGIN_VERIFIED"}
+    password_result = ccrelay_ssh.test_connection(
+        node["host"], node["port"], username, timeout_seconds,
+        password_override=password)
+    if password_result.get("success"):
+        return {**password_result, "status": "DEDICATED_LOGIN_VERIFIED"}
+    return password_result
 
 
 def provision_dedicated(node: Dict[str, Any], username: str, password: str, public_key: str,
@@ -571,14 +946,21 @@ def ensure_remote_center_key(node: Dict[str, Any], username: str, timeout_second
 
 def center_verify_command(target: Dict[str, Any], username: str, dedicated: bool,
                           source_capability: Optional[Dict[str, Any]] = None,
-                          source_username: Optional[str] = None) -> str:
+                          source_username: Optional[str] = None,
+                          ssh_arguments: Optional[List[str]] = None) -> str:
     capability = source_capability or {}
     target_host = shlex.quote(target["host"])
     target_user = shlex.quote(username)
     target_port = int(target["port"])
     ssh_path = capability.get("sshPath") or "ssh"
     shell_path = capability.get("shPath") or capability.get("shellPath") or "sh"
-    command = f"{shlex.quote(ssh_path)} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p {target_port} {target_user}@{target_host} printf CCRELAY_CENTER_TO_NODE_OK"
+    arguments = list(ssh_arguments or [])
+    if not arguments:
+        arguments = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                     "-o", "ConnectTimeout=10"]
+    rendered_arguments = " ".join(shlex.quote(value) for value in arguments)
+    command = (f"{shlex.quote(ssh_path)} {rendered_arguments} -p {target_port} "
+               f"{target_user}@{target_host} printf CCRELAY_CENTER_TO_NODE_OK")
     if dedicated and source_username != username:
         quoted = shlex.quote(command)
         runuser_path = capability.get("runuserPath")
@@ -600,8 +982,10 @@ def center_verify_command(target: Dict[str, Any], username: str, dedicated: bool
 
 def node_verify_command(target: Dict[str, Any], username: str,
                         source_capability: Optional[Dict[str, Any]] = None,
-                        source_username: Optional[str] = None) -> str:
-    return center_verify_command(target, username, True, source_capability, source_username)
+                        source_username: Optional[str] = None,
+                        ssh_arguments: Optional[List[str]] = None) -> str:
+    return center_verify_command(
+        target, username, True, source_capability, source_username, ssh_arguments)
 
 
 def fingerprint(public_key: str) -> str:
@@ -613,14 +997,36 @@ def fingerprint(public_key: str) -> str:
 
 def plan_interaction(failures: List[Dict[str, Any]], permission_failures: List[Dict[str, Any]]) -> Dict[str, Any]:
     fields = []
-    if failures:
+    argument_failures = [item for item in failures
+                         if item.get("bootstrapFailureType") == "SSH_ARGUMENTS_INCOMPATIBLE"]
+    options = []
+    if argument_failures:
+        options.extend([
+            {"id": "USE_USER_PROVIDED_SSH_ARGUMENTS", "label": "使用用户提供的 SSH 参数", "recommended": True},
+            {"id": "RETRY_DEFAULT_SSH_ARGUMENTS", "label": "确认客户端兼容后重试", "recommended": False},
+        ])
+        fields.extend([
+            {"name": "sshArgumentsMode", "label": "SSH 参数来源", "required": True,
+             "default": ccrelay_ssh.SSH_ARGUMENT_MODE_USER_PROVIDED,
+             "hint": "选择 USER_PROVIDED 后按 argv token 顺序填写", "secret": False},
+            {"name": "sshArguments", "label": "用户 SSH 参数 argv token", "required": True,
+             "default": ["-o", "StrictHostKeyChecking=no"],
+             "hint": "不要填写目标地址和 SSH 端口", "secret": False},
+        ])
+    if failures and not argument_failures:
         fields.append({"name": "nodeCredential", "label": "失败节点的节点级账号密码", "required": True,
                        "hint": "按 ip:port 单独配置；密码安全输入，不回显", "secret": True})
     if permission_failures:
         fields.append({"name": "accountMode", "label": "账号模式", "required": True,
                        "default": "EXISTING_ACCOUNT", "hint": "无法创建专用账号时可切换为现有账号模式", "secret": False})
-    return {"prompt": "SSH 身份计划无法直接执行，需要用户补充凭据或选择降级策略。",
-            "options": [{"id": "CREATE_NODE", "label": "补充节点级引导凭据", "recommended": True},
-                        {"id": "USE_EXISTING_ACCOUNT", "label": "切换为现有账号模式", "recommended": False},
-                        {"id": "CANCEL", "label": "取消配置", "recommended": False}],
+    if not argument_failures:
+        options.extend([
+            {"id": "CREATE_NODE", "label": "补充节点级引导凭据", "recommended": not bool(options)},
+            {"id": "USE_EXISTING_ACCOUNT", "label": "切换为现有账号模式", "recommended": False},
+            {"id": "CANCEL", "label": "取消配置", "recommended": False},
+        ])
+    else:
+        options.append({"id": "CANCEL", "label": "取消配置", "recommended": False})
+    return {"prompt": "SSH 身份计划无法直接执行，需要用户补充凭据、SSH 参数或选择降级策略。",
+            "options": options,
             "fields": fields}

@@ -80,6 +80,7 @@ public class RemoteCcRelayServer {
     private final ConcurrentMap<String, RemoteA2aTaskRecord> taskStore = new ConcurrentHashMap<>();
     private final RemoteSessionContextSynchronizer sessionContextSynchronizer;
     private final ConcurrentMap<String, SelfReplicateOperation> selfReplicateStore = new ConcurrentHashMap<>();
+    private final RemoteSkillSyncCoordinator skillSyncCoordinator;
     private HttpServer server;
     private String localNodeId;
 
@@ -108,6 +109,7 @@ public class RemoteCcRelayServer {
                 restTemplate,
                 requestSecurityService,
                 new RemoteSessionContextStateStore(properties, objectMapper));
+        this.skillSyncCoordinator = new RemoteSkillSyncCoordinator(properties, restTemplate);
     }
 
     private static RestTemplate createRestTemplate(RemoteCcRelayProperties properties) {
@@ -171,6 +173,7 @@ public class RemoteCcRelayServer {
         heartbeatExecutor.shutdownNow();
         taskExecutor.shutdownNow();
         sessionExecutionGate.shutdownNow();
+        skillSyncCoordinator.close();
     }
 
     public String getLocalNodeId() {
@@ -269,6 +272,7 @@ public class RemoteCcRelayServer {
             return;
         }
         postCenterRequest(endpoint, buildHeartbeatRequest(), Object.class, true);
+        skillSyncCoordinator.trigger();
     }
 
     private <T> T postCenterRequest(String endpoint, Object request, Class<T> responseType, boolean retryOnce) {
@@ -319,6 +323,7 @@ public class RemoteCcRelayServer {
         request.getDetail().put("nodeHost", resolveNodeHost());
         request.getDetail().put("nodeRole", properties == null ? "RELAY" : firstNonBlank(properties.getNodeRole(), "RELAY"));
         request.getDetail().put("aiReadiness", aiReadinessStatus());
+        request.getDetail().put("skills", skillSyncCoordinator.summary());
         return request;
     }
 
@@ -1526,6 +1531,10 @@ public class RemoteCcRelayServer {
         properties.setCenterRegisterEndpoint(value("WDSAVS_AI_RELAY_REGISTER_ENDPOINT", properties.getCenterRegisterEndpoint()));
         properties.setCenterHeartbeatEndpoint(value("WDSAVS_AI_RELAY_HEARTBEAT_ENDPOINT", properties.getCenterHeartbeatEndpoint()));
         properties.setHeartbeatIntervalMs(Long.parseLong(value("WDSAVS_AI_RELAY_HEARTBEAT_INTERVAL_MS", String.valueOf(properties.getHeartbeatIntervalMs()))));
+        properties.setSkillDirectory(firstNonBlankValue(
+                value("wdsavs.ai.skill.directory", null),
+                value("CCRELAY_SKILL_DIR", properties.getSkillDirectory())));
+        properties.setSkillMetadataDbPath(value("CCRELAY_SKILL_DB", properties.getSkillMetadataDbPath()));
         properties.setNodeIdFilePath(value("WDSAVS_AI_RELAY_NODE_ID_FILE", properties.getNodeIdFilePath()));
         properties.setNodeHost(value("WDSAVS_AI_RELAY_NODE_HOST", properties.getNodeHost()));
         properties.setNodeId(value("WDSAVS_AI_RELAY_NODE_ID", properties.getNodeId()));

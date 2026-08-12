@@ -10,6 +10,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class SshDeployExecutorImplBundleCopyCommandTest {
 
@@ -83,6 +84,7 @@ class SshDeployExecutorImplBundleCopyCommandTest {
         assertTrue(command.contains("--exclude=ccrelay/*.log"));
         assertTrue(command.contains("--exclude=ccrelay/runtime-windows"));
         assertTrue(command.contains("--exclude=ccrelay/bin/claude"));
+        assertTrue(command.contains("--exclude=ccrelay/config/claude-runtime/skills"));
         assertTrue(command.contains("--exclude=ccrelay/*.db"));
         assertFalse(command.contains("--exclude=ccrelay/tools/*.tgz"));
     }
@@ -189,6 +191,39 @@ class SshDeployExecutorImplBundleCopyCommandTest {
     }
 
     @Test
+    void shouldPreserveMissingResolvedPortWhenRemoteProbeFails() throws Exception {
+        SshDeployExecutorImpl executor = new SshDeployExecutorImpl() {
+            @Override
+            boolean isRemotePortAvailable(int sshPort, String target, int relayPort, long timeoutMs) {
+                throw new IllegalStateException("Host key verification failed");
+            }
+        };
+        SshDeployRequest request = new SshDeployRequest();
+        request.setHost("10.0.0.8");
+        request.setUsername("tester");
+        request.setScriptPath("/remote/install-relay.sh");
+        request.setSourceHost("source");
+        request.setSourceUsername("tester");
+
+        SshDeployResult result = executor.deploy(request);
+
+        assertFalse(result.isSuccess());
+        assertNull(result.getResolvedRelayPort());
+        assertTrue(result.getStderrSummary().contains("Host key verification failed"));
+        assertFalse(result.getStderrSummary().contains("intValue"));
+    }
+
+    @Test
+    void shouldUseNonStrictHostKeyCheckingForRemoteProbe() {
+        SshDeployExecutorImpl executor = new SshDeployExecutorImpl();
+
+        String command = String.join(" ", executor.remotePortProbeCommand(22, "tester@10.0.0.8", 18091));
+
+        assertTrue(command.contains("StrictHostKeyChecking=no"));
+        assertFalse(command.contains("StrictHostKeyChecking=accept-new"));
+    }
+
+    @Test
     void shouldAllowExplicitOccupiedPortOnlyForReplacement() throws Exception {
         PortAwareExecutor executor = new PortAwareExecutor(Set.of(18091));
         SshDeployRequest request = new SshDeployRequest();
@@ -196,6 +231,23 @@ class SshDeployExecutorImplBundleCopyCommandTest {
         request.setReplaceExistingRelay(true);
 
         assertEquals(18091, executor.resolveRelayPort(request, 22, "tester@10.0.0.8", 1000L));
+    }
+
+    @Test
+    void shouldReplaceExistingRelayByDefault() {
+        assertTrue(new SshDeployRequest().getReplaceExistingRelay());
+    }
+
+    @Test
+    void shouldCleanProductDirectoryBeforeReplacementDeployment() {
+        SshDeployExecutorImpl executor = new SshDeployExecutorImpl();
+
+        String command = executor.prepareRemoteDirectoryCommand(
+                "/home/ccrelay/ccrelay/10.0.0.8-18192", true);
+
+        assertTrue(command.startsWith("/bin/rm -rf -- "));
+        assertTrue(command.contains("&& /bin/mkdir -p"));
+        assertTrue(command.contains("10.0.0.8-18192"));
     }
 
     @Test

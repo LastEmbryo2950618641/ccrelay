@@ -57,6 +57,8 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
             "runtime-windows",
             "runtime-windows/*",
             "bin/claude",
+            "config/claude-runtime/skills",
+            "config/claude-runtime/skills/*",
             "config/*node-id*.txt");
 
     @Override
@@ -91,7 +93,7 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
 
             if (Boolean.TRUE.equals(request.getReplaceExistingRelay())) {
                 reportProgress(request, "STOPPING_EXISTING_RELAY", 15, 0L, null, "停止目标端口上的旧 Relay");
-                CommandResult stopExisting = run(command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(port), target,
+                CommandResult stopExisting = run(command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(port), target,
                         remoteShell(stopExistingRelayCommand(relayPort))), timeoutMs);
                 if (stopExisting.exitCode != 0) {
                     reportProgress(request, "FAILED", 15, 0L, null, "停止旧 Relay 失败");
@@ -99,9 +101,13 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
                 }
             }
 
-            reportProgress(request, "PREPARING_DIRECTORY", 20, 0L, null, "准备目标工作目录");
-            CommandResult mkdirResult = run(command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(port), target,
-                    "/bin/mkdir -p " + singleQuote(remoteDirectory)), timeoutMs);
+            reportProgress(request, "PREPARING_DIRECTORY", 20, 0L, null,
+                    Boolean.TRUE.equals(request.getReplaceExistingRelay())
+                            ? "清理已有 Relay 文件并重建目标工作目录"
+                            : "准备目标工作目录");
+            CommandResult mkdirResult = run(command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(port), target,
+                    prepareRemoteDirectoryCommand(remoteDirectory,
+                            Boolean.TRUE.equals(request.getReplaceExistingRelay()))), timeoutMs);
             if (mkdirResult.exitCode != 0) {
                 reportProgress(request, "FAILED", 20, 0L, null, "准备目标工作目录失败");
                 return withResolvedLayout(mkdirResult.toDeployResult(), relayPort, remoteDirectory);
@@ -141,7 +147,7 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
             String remoteCommand = "/bin/sh " + singleQuote(remoteScript)
                     + (remoteArgs.isEmpty() ? "" : " " + String.join(" ", remoteArgs));
             reportProgress(request, "STARTING_RELAY", 90, 0L, null, "启动 Relay 并等待本机健康检查");
-            CommandResult execute = run(command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(port), target, remoteCommand), timeoutMs);
+            CommandResult execute = run(command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(port), target, remoteCommand), timeoutMs);
             reportProgress(request, execute.exitCode == 0 ? "WAIT_REGISTER" : "FAILED",
                     execute.exitCode == 0 ? 100 : 90, 0L, null,
                     execute.exitCode == 0 ? "Relay 已启动，等待中心注册与心跳" : "Relay 启动或健康检查失败");
@@ -296,6 +302,14 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
     }
 
     boolean isRemotePortAvailable(int sshPort, String target, int relayPort, long timeoutMs) throws Exception {
+        CommandResult result = run(remotePortProbeCommand(sshPort, target, relayPort), timeoutMs);
+        if (result.exitCode == 255) {
+            throw new IllegalStateException("Failed to probe remote relay port " + relayPort + ": " + valueOrDefault(result.stderr, ""));
+        }
+        return result.exitCode == 0;
+    }
+
+    List<String> remotePortProbeCommand(int sshPort, String target, int relayPort) {
         String probeCommand = String.join(" && ",
                 "/bin/sh -c " + singleQuote(
                         "if command -v ss >/dev/null 2>&1; then " +
@@ -303,11 +317,8 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
                                 + relayPort + "\" '$4 ~ port { found=1 } END { exit found ? 0 : 1 }'; then exit 1; else exit 0; fi; " +
                                 "elif command -v lsof >/dev/null 2>&1; then if lsof -iTCP:" + relayPort + " -sTCP:LISTEN >/dev/null 2>&1; then exit 1; else exit 0; fi; " +
                                 "else exit 0; fi"));
-        CommandResult result = run(command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(sshPort), target, probeCommand), timeoutMs);
-        if (result.exitCode == 255) {
-            throw new IllegalStateException("Failed to probe remote relay port " + relayPort + ": " + valueOrDefault(result.stderr, ""));
-        }
-        return result.exitCode == 0;
+        return command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                "-p", String.valueOf(sshPort), target, probeCommand);
     }
 
     List<Integer> parsePortCandidates(String specification, int defaultPort) {
@@ -393,6 +404,14 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
                 + "fi";
     }
 
+    String prepareRemoteDirectoryCommand(String remoteDirectory, boolean replaceExistingRelay) {
+        String quoted = singleQuote(remoteDirectory);
+        if (replaceExistingRelay) {
+            return "/bin/rm -rf -- " + quoted + " && /bin/mkdir -p " + quoted;
+        }
+        return "/bin/mkdir -p " + quoted;
+    }
+
     private Integer relayPortFromCommandArguments(List<String> commandArguments) {
         if (commandArguments == null) {
             return null;
@@ -439,7 +458,7 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
         }
     }
 
-    private SshDeployResult withResolvedLayout(SshDeployResult result, int relayPort, String remoteDirectory) {
+    private SshDeployResult withResolvedLayout(SshDeployResult result, Integer relayPort, String remoteDirectory) {
         if (result == null) {
             return null;
         }
@@ -481,7 +500,7 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
         try {
             return runPipeline(
                     localDirectoryArchiveCommand(sourceParent, sourceName, preserveRuntimeArchive),
-                    command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(targetPort), target,
+                    command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(targetPort), target,
                             remoteShell(extractCommand)),
                     timeoutMs,
                     transferProgress);
@@ -592,7 +611,7 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
     private CommandResult copyFile(int port, String target, Path source, String remotePath, boolean executable,
                                    long timeoutMs) throws Exception {
         String parent = parentDirectory(remotePath);
-        CommandResult mkdir = run(command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(port), target,
+        CommandResult mkdir = run(command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(port), target,
                 "/bin/mkdir -p " + singleQuote(parent)), timeoutMs);
         if (mkdir.exitCode != 0) {
             return mkdir;
@@ -601,7 +620,7 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
         if (executable) {
             shellCommand += " && /usr/bin/chmod +x " + singleQuote(remotePath);
         }
-        return runWithInput(command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(port), target,
+        return runWithInput(command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(port), target,
                 remoteShell(shellCommand)), source.toFile(), timeoutMs);
     }
 
@@ -609,7 +628,7 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
                                          int targetPort, String target, String remotePath, boolean executable,
                                          long timeoutMs, TransferProgress transferProgress) throws Exception {
         String parent = parentDirectory(remotePath);
-        CommandResult mkdir = run(command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(targetPort), target,
+        CommandResult mkdir = run(command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(targetPort), target,
                 "/bin/mkdir -p " + singleQuote(parent)), timeoutMs);
         if (mkdir.exitCode != 0) {
             return mkdir;
@@ -620,9 +639,9 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
             writeCommand += " && /usr/bin/chmod +x " + singleQuote(remotePath);
         }
         return runPipeline(
-                command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(sourcePort), sourceTarget,
+                command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(sourcePort), sourceTarget,
                         remoteShell(readCommand)),
-                command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(targetPort), target,
+                command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(targetPort), target,
                         remoteShell(writeCommand)),
                 timeoutMs,
                 transferProgress);
@@ -637,9 +656,9 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
         String archiveCommand = remoteDirectoryArchiveCommand(sourceParent, sourceName, preserveRuntimeArchive);
         String extractCommand = buildDirectoryExtractCommand("-", remotePath, sourceName, false);
         return runPipeline(
-                command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(sourcePort), sourceTarget,
+                command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(sourcePort), sourceTarget,
                         remoteShell(archiveCommand)),
-                command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(targetPort), target,
+                command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(targetPort), target,
                         remoteShell(extractCommand)),
                 timeoutMs,
                 transferProgress);
@@ -705,6 +724,8 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
                 + " ! -name " + singleQuote("*.sqlite-*")
                 + " ! -name " + singleQuote("*.tmp")
                 + " ! -path " + singleQuote(sourceRoot + "/bin/claude")
+                + " ! -path " + singleQuote(sourceRoot + "/config/claude-runtime/skills")
+                + " ! -path " + singleQuote(sourceRoot + "/config/claude-runtime/skills/*")
                 + " ! -path " + singleQuote(sourceRoot + "/config/*node-id*.txt")
                 + " -print0");
         command.add("/bin/tar --null --files-from=- -cf -");
@@ -744,7 +765,7 @@ public class SshDeployExecutorImpl implements SshDeployExecutor {
         String probeCommand = "if [ -d " + singleQuote(sourcePath) + " ]; then echo DIRECTORY; "
                 + "elif [ -f " + singleQuote(sourcePath) + " ]; then echo FILE; "
                 + "else echo MISSING; fi";
-        CommandResult result = run(command(sshCommandName(), "-o", "BatchMode=yes", "-p", String.valueOf(port), target,
+        CommandResult result = run(command(sshCommandName(), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-p", String.valueOf(port), target,
                 remoteShell(probeCommand)), timeoutMs);
         String status = valueOrDefault(result.stdout, "").trim();
         if (result.exitCode != 0) {

@@ -24,13 +24,15 @@ public class RemoteCcRelayProperties {
     private String centerRegisterEndpoint;
     private String centerHeartbeatEndpoint;
     private long heartbeatIntervalMs = 30000L;
+    private String skillDirectory = "./skills";
+    private String skillMetadataDbPath;
     private String nodeIdFilePath;
     private String contextStateFilePath;
     private String nodeId;
     private String nodeHost;
     private String nodeRole = "RELAY";
     private String relayEndpoint;
-    private String version = "0.1.0";
+    private String version = "0.1.1";
     private String protocolVersion = "1.0";
     private List<String> capabilities = new ArrayList<>(List.of("CHAT", "A2A_MESSAGE_SEND", "A2A_TASK_CREATE", "A2A_TASK_GET", "A2A_TASK_CANCEL", "SELF_REPLICATE"));
     private long timeoutMs = 600000L;

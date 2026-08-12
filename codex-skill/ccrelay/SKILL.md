@@ -191,6 +191,8 @@ Base URL:
 ```text
 环境准备信息已经确认。请选择后续执行方式：
 
+部署时如检测到 CC Relay 旧版本或失败残留，将自动停止对应 Relay 并覆盖其产品工作目录；SSH 配置、专用账号和节点互信不受影响。
+
 1. 自动完成剩余部署（推荐）
 2. 逐步检视
 3. 取消
@@ -270,7 +272,7 @@ SSH 免密: 已验证
 
 - 操作 relay 节点前，先阅读 `references/remote-first-runbook.md`。
 - 运行时能力必须使用本 skill 目录内脚本：Windows 使用 `scripts/ccrelay-cli.ps1`，Linux 使用 `scripts/ccrelay-cli.sh`；脚本优先使用包内 Python 3.13，不要求宿主机预装 Python。`python scripts/ccrelay-cli.py` 仅供源码开发调试，不是发布运行方式。
-- 收到包含目标 IP/SSH 端口的自然语言任务时，第一条命令必须是 `<CLI> bootstrap next --node <ip:port>...`。本地阶段库只记录三种里程碑：无记录为 `UNINITIALIZED`、免密验证完成为 `SSH_READY`、完整部署验收完成为 `DEPLOYED`；不得用文件探测、历史会话或 Center 状态推断并跳过阶段。
+- 收到包含目标 IP/SSH 端口的自然语言任务时，第一条命令必须是 `<CLI> bootstrap next --node <ip:port>...`。多个节点可以重复传入 `--node`，也可以使用 `--nodes <node-a>,<node-b>` 逗号分隔；CLI 必须将两种形式统一展开为独立节点，不得把逗号列表作为一个主机名。本地阶段库只记录三种里程碑：无记录为 `UNINITIALIZED`、免密验证完成为 `SSH_READY`、完整部署验收完成为 `DEPLOYED`；不得用文件探测、历史会话或 Center 状态推断并跳过阶段。
 - `UNINITIALIZED` 必须进入 SSH 引导，不能先执行 `center resolve`、`ssh preflight`、Relay 探测或直接 SSH；`DEPLOYED` 才进入正常 Relay 协作。完整部署、注册、心跳和协同验证全部通过后执行 `<CLI> bootstrap mark-deployed`。
 - 如果 Skill 内 `app.jar`、目标平台 JRE、内置 Python 或部署脚本缺失，必须立即返回 `SKILL_RUNTIME_INCOMPLETE` 并停止；不得搜索历史会话、历史命令、SSH 配置或本机私钥来恢复旧凭据，不得绕过 Skill 直接 SSH，也不得把历史测试中心或节点状态当作当前配置。只有安装完整 Skill 包后才能重新开始标准引导。
 - 全局 `ccrelay-cli` 命令只是用户显式安装后的可选快捷别名，不作为标准 Skill 依赖；发布、验收和跨机器复制都不得依赖 skill 目录外的 shim。
@@ -294,6 +296,7 @@ SSH 免密: 已验证
 - 通过 `<CLI> access request` 申请 relay 访问授权，并在后续远端调用中使用返回的 `grantId`、`signedToken` 与 relay 上下文。
 - 目标节点已经注册且心跳健康时，优先直连远端 relay。
 - 常规远端协作优先使用 `<CLI> agent run`、`<CLI> agent fanout`、`<CLI> agent task-create` 与 `<CLI> agent task-events`。
+- 面向中小规模集群的批量 Relay 部署使用 `<CLI> task create-batch --target-node-ids <nodeA:relayPort,nodeB:relayPort> --concurrency <n>`；目标会去重，共享一次真实部署会话，按并发上限创建独立 `DEPLOY_RELAY` 子任务，单目标失败隔离，结果按输入顺序返回。它只提交任务，不等待终态，后续用 `<CLI> task observe --task-ids <taskId,...>` 或逐个 `task events` 监控。该入口是现有单目标部署的 CLI 批量包装，不代表完整 P7 动态源池/波次调度。
 - 低层 A2A 调试才使用 `<CLI> a2a message-send` 与 `<CLI> a2a task-create|get|events|cancel`。
 - 目标 relay 不可用时，通过 `<CLI> task create` 创建 `DEPLOY_RELAY` 任务，并设置 `deployMode=SELF_REPLICATE` 与 `enableCenterFallback=true`，让运行时先尝试源端自复制，最后才走中心 SSH 兜底。部署属于已有用户会话时传入该真实 `sessionId`；独立引导部署没有会话时省略 `--session-id`，由 CLI 自动执行 `session open` 并使用 Center 返回值。禁止构造 `bootstrap-default` 或其他未由 Center 返回的会话 ID。
 - `task create` 必须依据当前已解析中心自动向 `SELF_REPLICATE` payload 注入注册、心跳和授权校验上下文；主 AI 不手工拼写或向用户展示内部中心端点。
@@ -306,10 +309,15 @@ SSH 免密: 已验证
 - SSH 密码只能保存到本 skill 的 `.local/ssh-credentials.json`，Windows 使用当前用户 DPAPI 加密，Linux 使用当前用户 `0600` 权限；不得写入任务 payload、中心数据库、日志或最终回复。覆盖安装必须保留 `.local/`。
 - 凭据输入必须按宿主能力选择：当前有 TTY 时使用 `getpass` 隐藏输入；宿主 GUI 能拉起终端时，向用户提供 Skill 内包装命令，让用户在新终端隐藏输入后回到当前会话继续；没有 GUI/TTY 时仍优先提供该终端命令。只有用户明确选择风险后，才允许使用“直接填写账号密码”的手工兜底，且密码只能通过进程级环境变量或临时文件传给 CLI，绝不能拼进命令行、日志或回复。
 - SSH 引导账号与 relay 长期运行账号分离。首次配置严格按“凭据填写 → 全部节点只读验证 → 账号模式选择并立即执行 `ssh identity select` 保存 → 专用账号和目录确认 → apply”执行；凭据未验证完成前不得展示或接受账号模式配置。
+- SSH 参数来源必须可配置。凭据命令使用 `--ssh-arguments-mode DEFAULT|USER_PROVIDED`；默认模式使用兼容 OpenSSH 7.4 的 Skill 参数（包括 `StrictHostKeyChecking=no`），`USER_PROVIDED` 模式只使用用户重复传入的 `--ssh-argument`，不再叠加 Skill 的连接、HostKey、BatchMode 或认证参数，只保留目标端口、地址和必要的密钥传递。若用户已有更严格的 SSH 策略，必须选择用户参数模式并自行提供参数。
+- SSH 多节点引导统一使用 `--concurrency <n>` 控制最大并发，默认 `4`、范围 `1-32`。未显式指定时不得退回逐节点串行；节点探测、账号或公钥安装、Center 到节点验证，以及专用账号 FULL_MESH 信任边验证都受同一上限约束。单节点内部步骤保持顺序，结果按输入顺序展示，单节点失败不得取消其他节点。
+- 用户首次确认部署范围并执行 `bootstrap next --node ...` 时，CLI 必须立即把完整节点集合持久化为 `targetNodes`，即使 SSH 凭据尚未配置。后续 `ssh identity plan|select|apply|verify|rotate-key` 与 `center plan|bootstrap` 默认复用完整 active 目标集合；再次只传部分 `--node` 不得缩小集群。失败节点保留在目标集合并记录为 `failedNodes`；只有用户显式执行 `ssh identity targets exclude --node ... --confirm true` 才能移除。
+- `FULL_MESH` 必须相对于完整 active 目标集合验收：全部目标节点已验证，且 N 个专用账号节点必须存在并通过 `N * (N - 1)` 条有向互信边。`trustEdges=[]` 只对真实单节点目标集合有效；不得根据一次单节点 `apply/verify` 推断多节点集群已完成。
 - 凭据验证必须使用只读探测；`ssh test --bootstrap-key false` 即使配置允许后续免密，也不得写入 `authorized_keys`，成功时返回 `CREDENTIAL_VALID` 且不提示提前初始化免密。只有显式进入免密初始化或部署预检时才能安装公钥。
 - 允许创建时，专用账号默认名为 `ccrelay`，密码由 Skill 随机生成并只保存受保护引用；共享集群密钥用于节点间免密，只有完整互信验证通过才允许直接自复制。
 - 不允许创建时，不修改远端系统账号；至少验证 CC center 到全部节点免密，AI 不得假设节点间 SSH 互通。
 - 身份策略和验证能力通过 `<CLI> ssh identity status|verify` 查询并落入中心 SQLite；主 AI 只依据 `FULL_MESH`、`CENTER_ONLY`、`DEGRADED`、`UNKNOWN` 做部署决策。
+- 专用账号验收必须区分 `VERIFIED`、`UNMANAGED` 和 `INACCESSIBLE`：只有明确有权限检查且没有 Skill 标记时才报告同名账号冲突；引导账号无法读取专用账号目录时不能推断创建失败。若专用账号的集群密钥登录成功，验收直接使用专用账号执行检查，不得强制要求引导账号具备 `sudo -u` 权限。
 - 当 `<CLI> ssh identity|preflight` 或部署命令返回 `NEED_USER_INPUT` 时，立即暂停部署，原样展示返回的 `interaction.options` 与 `interaction.fields` 给用户选择和填写；不得跳过询问、不得手工 SSH 修复。`SSH_CREDENTIALS_INVALID` 必须先修复失败节点并重新验证，不能直接进入账号模式。
 - `NEED_USER_INPUT` 是当前 Agent 轮次的强制终止状态：最终回复只能复制 CLI 返回的 `verbatimResponse`。内部选项 ID、字段名、JSON 和命令参数只供 AI 编排使用，不得展示给用户。涉及密码/API key 时，只有用户已明确选择明文方式后，才能展示秘密字段并接收明文；否则不得要求用户把秘密发到对话中。
 - 用户只提供目标 IP/SSH 端口且中心没有注册节点时，首次 SSH 引导必须一次性执行 `<CLI> ssh identity plan --node <ip:port>...`，由该命令返回集群级凭据、节点覆盖和账号模式交互；不得先逐节点调用 `ssh preflight` 来替代首次引导，也不得先尝试直接按 IP 调用 Relay。
@@ -326,6 +334,7 @@ SSH 免密: 已验证
 - 只有用户主动选择“手动指定中心”时，才询问中心协议、主机、端口和基础路径。relay 的注册、心跳和授权校验端点由 CLI 根据已选中心自动生成，不向普通用户暴露内部 API 路径。
 - 完成 SSH 凭据、节点级覆盖、账号模式和专用账号详情确认后，必须先让用户完成模型配置选择与连通性测试，再让用户选择“自动执行”或“检视”。即使用户此前已选择自动执行，模型配置未完成时也只能暂停，不能自动拉起 API key 弹窗或代替用户选择输入方式。模型配置成功后由用户重新确认执行模式；自动执行时由 CLI 依次完成资源探测、中心选择、端口探测、运行时分发、中心启动、状态同步、relay 部署和验收；确定性代码无法判断且不触及安全边界时，才由当前 AI 根据结构化上下文决策。
 - 用户选择账号模式后必须先调用 `ssh identity select` 保存到当前 Skill 配置；后续 `plan|apply|verify|deploy` 只读取该配置，不得再次推断或覆盖账号模式。执行模式是远端变更的强制门禁，但模型配置选择必须排在执行模式之前：用户确认专用账号详情后，先执行 `prepare-cc-config --discover`，让用户选择复用本机配置或填写新配置，再让用户选择 API key 的安全终端/安全命令/明文兜底方式，完成测试并写入配置；配置未完成时不得展示或接受 `AUTO_EXECUTE_REMAINING`。模型配置就绪后重新执行 `ssh identity plan|apply`，此时才返回 `BOOTSTRAP_EXECUTION_MODE_REQUIRED`；未明确传入 `--execution-mode AUTO_EXECUTE_REMAINING|INSPECT_STEP_BY_STEP` 时，不得创建账号、安装密钥或修改远端。选择执行模式后必须先做资源探测和中心选择，再把选中的中心传给 `ssh identity apply`；禁止在资源探测前临时指定第一台节点为中心。
+- Relay 部署默认是幂等覆盖。任务开始后检测到目标产品工作目录、旧版本或失败残留时，代码自动精准停止目标 Relay、删除该工作目录并重新安装，不再中途询问用户；覆盖语义只在执行方式确认模板中提示。该操作不得删除 SSH 凭据、专用账号、集群密钥或节点互信。
 - `ssh identity plan` 的凭据验证、账号模式选择和专用账号详情预览阶段只需要 `--node` 清单，不得要求或推断 `--center-node`；`apply/verify/rotate-key` 才强制使用资源探测后选出的中心节点。
 - 身份初始化早于中心进程启动，因此本地身份状态允许暂存为 `CENTER_IDENTITY_SYNC_DEFERRED`；这不是失败。中心启动后必须执行 `ssh identity verify` 写入中心 SQLite，只有同步和验证成功后才允许部署 Relay。
 - 检视模式每次只展示当前步骤，并按步骤动态提供“自动执行本步”“手动配置本步”“后续全部自动执行”以及适用的重试、跳过、取消选项。只有选择手动配置本步时，才展示该步骤字段。
@@ -398,4 +407,12 @@ SSH 免密: 已验证
 - `ssh tools|test|center-key|prepare-center|preflight` 完成本机工具检查、凭据测试、中心公钥初始化和中心侧免密验证。
 - `ssh identity plan|apply|status|verify|rotate-key` 管理 Skill 专用账号、中心管理密钥、集群互信和脱敏能力摘要。
 - `remote` 命令组只能在明确诊断或恢复远端 relay 时使用，不作为首选协同路径。
+
+## 集群 Skill 管理
+
+- 用户要求安装标准 Skill 时，执行 `<CLI> skill install <directory-or-zip>`。输入必须包含根级 `SKILL.md`，不得通过 SSH 或逐节点复制替代该命令。
+- 用户要求查看集群 Skill 时，执行 `<CLI> skill list`；用户明确要求删除时，执行 `<CLI> skill remove <skillId>`。
+- CC Center 是 Skill 目录和制品的唯一权威来源。CLI 只上传 Center；Center Relay 与普通 Relay 在成功心跳后异步按 SHA-256 收敛，不要求用户确认远端 Skill 目录。
+- 删除是逻辑失效。Center 保留 `INVALID` 元数据，Relay 收到完整目录后将对应本地 Skill 置为 `INVALID` 并移出 Claude 可见目录。
+- Relay 返回 `INSTALLING` 且带 `lastError` 时表示本轮传输或校验失败、后续心跳会重试，不得解释为用户已删除或 Skill 已失效。只有 `INSTALLED` 的 Skill 才能用于后续 Agent 调用。
 - 关闭会话使用 `session close <sessionId>`；关闭后该会话下仍可用的授权会失效。

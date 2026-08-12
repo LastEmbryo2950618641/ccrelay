@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 CONFIG_VERSION = 2
 DEFAULT_SSH_PORT = 22
 DEFAULT_TIMEOUT_SECONDS = 15
+SSH_ARGUMENT_MODE_DEFAULT = "DEFAULT"
+SSH_ARGUMENT_MODE_USER_PROVIDED = "USER_PROVIDED"
 DEFAULT_KEY_NAME = "id_ed25519_ccrelay"
 REQUIRED_TOOLS = ("ssh", "scp", "ssh-keygen")
 REMOTE_POSIX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -61,6 +63,10 @@ def default_config() -> Dict[str, Any]:
         "bootstrapCredentials": {"default": None, "nodes": {}},
         "clusterIdentity": {
             "clusterId": "default",
+            "targetNodes": [],
+            "managedNodes": [],
+            "failedNodes": [],
+            "excludedNodes": [],
             "selectionRequired": True,
             "accountMode": "EXISTING_ACCOUNT",
             "dedicatedAccountCreationAllowed": False,
@@ -88,7 +94,9 @@ def load_config() -> Dict[str, Any]:
     if not isinstance(loaded, dict):
         raise SshCredentialError(f"SSH 凭据配置格式无效: {path}")
     config = default_config()
-    config.update(loaded)
+    loaded_identity = loaded.get("clusterIdentity") if isinstance(loaded.get("clusterIdentity"), dict) else {}
+    loaded_runtime = loaded.get("runtime") if isinstance(loaded.get("runtime"), dict) else {}
+    config.update({key: value for key, value in loaded.items() if key not in {"clusterIdentity", "runtime"}})
     bootstrap = loaded.get("bootstrapCredentials") if isinstance(loaded.get("bootstrapCredentials"), dict) else {}
     default_credential = bootstrap.get("default") if "default" in bootstrap else loaded.get("default")
     node_credentials = bootstrap.get("nodes") if isinstance(bootstrap.get("nodes"), dict) else loaded.get("nodes")
@@ -96,8 +104,19 @@ def load_config() -> Dict[str, Any]:
     config["nodes"] = node_credentials if isinstance(node_credentials, dict) else {}
     config["bootstrapCredentials"] = {"default": config["default"], "nodes": config["nodes"]}
     has_identity = isinstance(loaded.get("clusterIdentity"), dict)
-    identity = loaded.get("clusterIdentity") if has_identity else {}
+    identity = loaded_identity
     config["clusterIdentity"].update(identity)
+    if not identity.get("targetNodes") and identity.get("managedNodes"):
+        config["clusterIdentity"]["targetNodes"] = [
+            {
+                "host": item.get("host"),
+                "port": int(item.get("port") or 22),
+                "nodeKey": item.get("nodeKey") or node_key(item.get("host"), item.get("port") or 22),
+                "username": item.get("bootstrapUsername") or item.get("username"),
+            }
+            for item in identity.get("managedNodes") or []
+            if isinstance(item, dict) and item.get("host")
+        ]
     if not has_identity:
         config["clusterIdentity"]["selectionRequired"] = True
     dedicated = identity.get("dedicatedAccount") if isinstance(identity.get("dedicatedAccount"), dict) else {}
@@ -108,7 +127,7 @@ def load_config() -> Dict[str, Any]:
         )
     if not isinstance(config["clusterIdentity"]["dedicatedAccount"].get("passwordSecrets"), dict):
         config["clusterIdentity"]["dedicatedAccount"]["passwordSecrets"] = {}
-    config["runtime"] = loaded.get("runtime") if isinstance(loaded.get("runtime"), dict) else config["runtime"]
+    config["runtime"].update(loaded_runtime)
     return config
 
 
@@ -133,6 +152,8 @@ def set_default_credential(
     enable_passwordless: bool = True,
     allow_cluster_mutual: bool = True,
     remote_directory: Optional[str] = None,
+    ssh_arguments_mode: str = SSH_ARGUMENT_MODE_DEFAULT,
+    ssh_arguments: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     config = load_config()
     config["default"] = _credential_record(
@@ -142,6 +163,8 @@ def set_default_credential(
         enable_passwordless,
         allow_cluster_mutual,
         remote_directory,
+        ssh_arguments_mode,
+        ssh_arguments,
     )
     path = save_config(config)
     return credential_view(config["default"], "DEFAULT", path)
@@ -153,6 +176,8 @@ def set_passwordless_default(
     private_key_path: Optional[str] = None,
     allow_cluster_mutual: bool = True,
     remote_directory: Optional[str] = None,
+    ssh_arguments_mode: str = SSH_ARGUMENT_MODE_DEFAULT,
+    ssh_arguments: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     config = load_config()
     config["default"] = _passwordless_credential_record(
@@ -161,6 +186,8 @@ def set_passwordless_default(
         private_key_path,
         allow_cluster_mutual,
         remote_directory,
+        ssh_arguments_mode,
+        ssh_arguments,
     )
     path = save_config(config)
     return credential_view(config["default"], "DEFAULT", path)
@@ -174,6 +201,8 @@ def set_node_credential(
     enable_passwordless: bool = True,
     allow_cluster_mutual: bool = True,
     remote_directory: Optional[str] = None,
+    ssh_arguments_mode: str = SSH_ARGUMENT_MODE_DEFAULT,
+    ssh_arguments: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     normalized_host = require_text(host, "host")
     config = load_config()
@@ -185,6 +214,8 @@ def set_node_credential(
         enable_passwordless,
         allow_cluster_mutual,
         remote_directory,
+        ssh_arguments_mode,
+        ssh_arguments,
     )
     path = save_config(config)
     return credential_view(config["nodes"][key], "NODE", path, key)
@@ -221,6 +252,10 @@ def masked_config_view() -> Dict[str, Any]:
         "nodes": {key: credential_view(value, "NODE", path, key) for key, value in nodes.items()},
         "clusterIdentity": {
             "clusterId": identity.get("clusterId", "default"),
+            "targetNodeCount": len(identity.get("targetNodes") or []),
+            "managedNodeCount": len(identity.get("managedNodes") or []),
+            "failedNodeCount": len(identity.get("failedNodes") or []),
+            "excludedNodeCount": len(identity.get("excludedNodes") or []),
             "selectionRequired": bool(identity.get("selectionRequired", False)),
             "accountMode": identity.get("accountMode", "EXISTING_ACCOUNT"),
             "dedicatedAccountCreationAllowed": bool(identity.get("dedicatedAccountCreationAllowed", False)),
@@ -650,6 +685,26 @@ def missing_default_interaction(host: str, port: int) -> Dict[str, Any]:
 
 
 def failed_credential_interaction(host: str, port: int, failure_type: str, summary: str, scope: Optional[str]) -> Dict[str, Any]:
+    if failure_type == "SSH_ARGUMENTS_INCOMPATIBLE":
+        return {
+            "prompt": f"节点 {node_key(host, port)} 的 SSH 客户端不支持 Skill 默认参数，请选择 SSH 参数来源：",
+            "options": [
+                option("USE_USER_PROVIDED_SSH_ARGUMENTS", "使用用户提供的 SSH 参数", True),
+                option("RETRY_DEFAULT_SSH_ARGUMENTS", "确认客户端兼容后重试"),
+                option("CANCEL", "取消本次部署"),
+            ],
+            "fields": [
+                field("sshArgumentsMode", "SSH 参数来源", True, SSH_ARGUMENT_MODE_USER_PROVIDED,
+                      "选择 USER_PROVIDED 后按 argv token 顺序填写参数"),
+                field("sshArguments", "用户 SSH 参数 argv token", True,
+                      ["-o", "StrictHostKeyChecking=no"],
+                      "可重复传入 --ssh-argument；不要填写目标地址和 SSH 端口"),
+            ],
+            "failureType": failure_type,
+            "failureSummary": summary,
+            "credentialScope": scope,
+            "resume": "保存 SSH 参数后重新执行原 ssh identity plan|apply 命令。",
+        }
     return {
         "prompt": f"SSH 配置无法连接节点 {node_key(host, port)}。失败类型: {failure_type}。请选择处理方式：",
         "options": [
@@ -766,6 +821,8 @@ def failure_result(host: str, port: int, failure_type: str, summary: str, **extr
 
 def classify_ssh_failure(result: Dict[str, Any]) -> str:
     text = str(result.get("summary") or "").lower()
+    if "bad configuration option" in text and "accept-new" in text:
+        return "SSH_ARGUMENTS_INCOMPATIBLE"
     if "host key verification failed" in text or "remote host identification has changed" in text:
         return "HOST_KEY_CHANGED"
     if "permission denied" in text or "authentication failed" in text:
@@ -804,6 +861,8 @@ def credential_view(record: Dict[str, Any], scope: str, path: Path, key: Optiona
         "enablePasswordless": bool(record.get("enablePasswordless", True)),
         "allowClusterMutual": bool(record.get("allowClusterMutual", True)),
         "remoteDirectory": record.get("remoteDirectory"),
+        "sshArgumentsMode": record.get("sshArgumentsMode", SSH_ARGUMENT_MODE_DEFAULT),
+        "sshArgumentCount": len(record.get("sshArguments") or []),
         "updatedAt": record.get("updatedAt"),
         "configPath": str(path),
     }
@@ -826,6 +885,38 @@ def normalize_port(port: int) -> int:
     return parsed
 
 
+def normalize_ssh_arguments(mode: str, arguments: Optional[Iterable[str]]) -> Tuple[str, List[str]]:
+    normalized_mode = str(mode or SSH_ARGUMENT_MODE_DEFAULT).strip().upper()
+    if normalized_mode not in {SSH_ARGUMENT_MODE_DEFAULT, SSH_ARGUMENT_MODE_USER_PROVIDED}:
+        raise SshCredentialError(
+            f"ssh 参数模式无效: {normalized_mode}；可选 DEFAULT 或 USER_PROVIDED")
+    normalized_arguments = [str(value) for value in (arguments or [])]
+    if any("\x00" in value for value in normalized_arguments):
+        raise SshCredentialError("SSH 参数不能包含 NUL 字符")
+    if len(normalized_arguments) > 64:
+        raise SshCredentialError("SSH 参数数量不能超过 64 个")
+    if normalized_mode == SSH_ARGUMENT_MODE_USER_PROVIDED and not normalized_arguments:
+        raise SshCredentialError("使用用户 SSH 参数时至少需要提供一个参数")
+    if normalized_mode == SSH_ARGUMENT_MODE_DEFAULT:
+        normalized_arguments = []
+    return normalized_mode, normalized_arguments
+
+
+def ssh_arguments_for_credential(credential: Optional[Dict[str, Any]]) -> Optional[List[str]]:
+    if not credential:
+        return None
+    mode, arguments = normalize_ssh_arguments(
+        credential.get("sshArgumentsMode", SSH_ARGUMENT_MODE_DEFAULT),
+        credential.get("sshArguments"),
+    )
+    return list(arguments) if mode == SSH_ARGUMENT_MODE_USER_PROVIDED else None
+
+
+def ssh_arguments_for(host: str, port: int = DEFAULT_SSH_PORT) -> List[str]:
+    credential, _scope = resolve_credential(host, port)
+    return ssh_arguments_for_credential(credential) or []
+
+
 def storage_protection() -> str:
     return "WINDOWS_DPAPI_CURRENT_USER" if os.name == "nt" else "FILE_MODE_0600"
 
@@ -837,7 +928,10 @@ def _credential_record(
     enable_passwordless: bool,
     allow_cluster_mutual: bool,
     remote_directory: Optional[str],
+    ssh_arguments_mode: str,
+    ssh_arguments: Optional[Iterable[str]],
 ) -> Dict[str, Any]:
+    normalized_mode, normalized_arguments = normalize_ssh_arguments(ssh_arguments_mode, ssh_arguments)
     record = {
         "username": require_text(username, "username"),
         "credentialSource": "USER_PROVIDED",
@@ -846,6 +940,8 @@ def _credential_record(
         "enablePasswordless": bool(enable_passwordless),
         "allowClusterMutual": bool(allow_cluster_mutual),
         "remoteDirectory": remote_directory.strip() if remote_directory and remote_directory.strip() else None,
+        "sshArgumentsMode": normalized_mode,
+        "sshArguments": normalized_arguments,
         "updatedAt": int(time.time() * 1000),
     }
     if os.name == "nt":
@@ -861,7 +957,10 @@ def _passwordless_credential_record(
     private_key_path: Optional[str],
     allow_cluster_mutual: bool,
     remote_directory: Optional[str],
+    ssh_arguments_mode: str,
+    ssh_arguments: Optional[Iterable[str]],
 ) -> Dict[str, Any]:
+    normalized_mode, normalized_arguments = normalize_ssh_arguments(ssh_arguments_mode, ssh_arguments)
     normalized_key_path = None
     if private_key_path and str(private_key_path).strip():
         key_path = Path(str(private_key_path)).expanduser().resolve()
@@ -877,6 +976,8 @@ def _passwordless_credential_record(
         "enablePasswordless": True,
         "allowClusterMutual": bool(allow_cluster_mutual),
         "remoteDirectory": remote_directory.strip() if remote_directory and remote_directory.strip() else None,
+        "sshArgumentsMode": normalized_mode,
+        "sshArguments": normalized_arguments,
         "updatedAt": int(time.time() * 1000),
     }
 
@@ -925,24 +1026,30 @@ def _run_ssh(
     executable = shutil.which("ssh")
     if not executable:
         return {"success": False, "exitCode": None, "summary": "ssh executable not found", "authMode": "NONE"}
-    command = [
-        executable,
-        "-o", "ConnectTimeout={}".format(max(1, int(timeout_seconds))),
-        "-o", "ConnectionAttempts=1",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "NumberOfPasswordPrompts=1",
-        "-p", str(normalize_port(port)),
-    ]
+    credential, _scope = resolve_credential(host, port)
+    custom_arguments = ssh_arguments_for_credential(credential)
+    command = [executable]
+    if custom_arguments is None:
+        command.extend([
+            "-o", "ConnectTimeout={}".format(max(1, int(timeout_seconds))),
+            "-o", "ConnectionAttempts=1",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "NumberOfPasswordPrompts=1",
+        ])
+    else:
+        command.extend(custom_arguments)
+    command.extend(["-p", str(normalize_port(port))])
     environment = os.environ.copy()
     temporary_directory = None
     auth_mode = "PUBLIC_KEY"
     if password is not None:
         auth_mode = "PASSWORD"
-        command.extend([
-            "-o", "BatchMode=no",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "PreferredAuthentications=password,keyboard-interactive",
-        ])
+        if custom_arguments is None:
+            command.extend([
+                "-o", "BatchMode=no",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PreferredAuthentications=password,keyboard-interactive",
+            ])
         temporary_directory = tempfile.TemporaryDirectory(prefix="ccrelay-askpass-")
         askpass = _write_askpass_helper(Path(temporary_directory.name))
         environment["CCRELAY_SSH_PASSWORD"] = password
@@ -950,9 +1057,12 @@ def _run_ssh(
         environment["SSH_ASKPASS_REQUIRE"] = "force"
         environment.setdefault("DISPLAY", "ccrelay:0")
     else:
-        command.extend(["-o", "BatchMode=yes"])
+        if custom_arguments is None:
+            command.extend(["-o", "BatchMode=yes"])
         if key_path and key_path.is_file():
-            command.extend(["-o", "IdentitiesOnly=yes", "-i", str(key_path)])
+            if custom_arguments is None:
+                command.extend(["-o", "IdentitiesOnly=yes"])
+            command.extend(["-i", str(key_path)])
     command.extend([f"{username}@{host}", remote_command])
     started = time.monotonic()
     try:
@@ -1122,25 +1232,30 @@ def _run_scp(
     executable = shutil.which("scp")
     if not executable:
         return {"success": False, "exitCode": None, "summary": "scp executable not found", "authMode": "NONE"}
-    command = [
-        executable,
-        "-r",
-        "-o", "ConnectTimeout={}".format(max(1, min(int(timeout_seconds), 60))),
-        "-o", "ConnectionAttempts=1",
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", "NumberOfPasswordPrompts=1",
-        "-P", str(normalize_port(port)),
-    ]
+    credential, _scope = resolve_credential(host, port)
+    custom_arguments = ssh_arguments_for_credential(credential)
+    command = [executable, "-r"]
+    if custom_arguments is None:
+        command.extend([
+            "-o", "ConnectTimeout={}".format(max(1, min(int(timeout_seconds), 60))),
+            "-o", "ConnectionAttempts=1",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "NumberOfPasswordPrompts=1",
+        ])
+    else:
+        command.extend(custom_arguments)
+    command.extend(["-P", str(normalize_port(port))])
     environment = os.environ.copy()
     temporary_directory = None
     auth_mode = "PUBLIC_KEY"
     if password is not None:
         auth_mode = "PASSWORD"
-        command.extend([
-            "-o", "BatchMode=no",
-            "-o", "PubkeyAuthentication=no",
-            "-o", "PreferredAuthentications=password,keyboard-interactive",
-        ])
+        if custom_arguments is None:
+            command.extend([
+                "-o", "BatchMode=no",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PreferredAuthentications=password,keyboard-interactive",
+            ])
         temporary_directory = tempfile.TemporaryDirectory(prefix="ccrelay-askpass-")
         askpass = _write_askpass_helper(Path(temporary_directory.name))
         environment["CCRELAY_SSH_PASSWORD"] = password
@@ -1148,9 +1263,12 @@ def _run_scp(
         environment["SSH_ASKPASS_REQUIRE"] = "force"
         environment.setdefault("DISPLAY", "ccrelay:0")
     else:
-        command.extend(["-o", "BatchMode=yes"])
+        if custom_arguments is None:
+            command.extend(["-o", "BatchMode=yes"])
         if key_path and key_path.is_file():
-            command.extend(["-o", "IdentitiesOnly=yes", "-i", str(key_path)])
+            if custom_arguments is None:
+                command.extend(["-o", "IdentitiesOnly=yes"])
+            command.extend(["-i", str(key_path)])
     command.extend(str(item) for item in sources)
     command.append(f"{username}@{host}:{remote_directory}")
     started = time.monotonic()

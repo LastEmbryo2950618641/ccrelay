@@ -20,6 +20,7 @@ relay_hmac_secret_file="${WDSAVS_AI_RELAY_HMAC_SECRET_FILE:-$bundle_dir/config/r
 relay_system_prompt_file="${WDSAVS_AI_RELAY_SYSTEM_PROMPT_FILE:-$bundle_dir/config/relay-system-prompt.txt}"
 claude_config_dir="$bundle_dir/config/claude-runtime"
 claude_settings_file="$claude_config_dir/settings.json"
+skill_directory="${CCRELAY_SKILL_DIR:-$bundle_dir/skills}"
 
 relay_port="${WDSAVS_CC_RELAY_PORT:-18091}"
 relay_bind_host="${WDSAVS_CC_RELAY_HOST:-0.0.0.0}"
@@ -73,6 +74,7 @@ if [ -z "$relay_endpoint" ] && [ -n "$relay_node_host" ] && [ -n "$relay_port" ]
 fi
 export WDSAVS_CC_RELAY_HOST="$relay_bind_host"
 export WDSAVS_CC_RELAY_PORT="$relay_port"
+export CCRELAY_SKILL_DIR="$skill_directory"
 export WDSAVS_AI_RELAY_NODE_ID_FILE="${WDSAVS_AI_RELAY_NODE_ID_FILE:-$bundle_dir/config/node-id.txt}"
 [ ! -f "$relay_hmac_secret_file" ] || /usr/bin/chmod 600 "$relay_hmac_secret_file" >/dev/null 2>&1 || true
 if [ -f "$relay_hmac_secret_file" ]; then
@@ -193,6 +195,7 @@ PY
 
 /bin/mkdir -p "$bundle_dir/runtime/ccrelay"
 /bin/mkdir -p "$claude_config_dir"
+/bin/mkdir -p "$skill_directory"
 printf '{}\n' > "$claude_settings_file"
 /usr/bin/chmod 600 "$claude_settings_file" >/dev/null 2>&1 || true
 export CLAUDE_CONFIG_DIR="$claude_config_dir"

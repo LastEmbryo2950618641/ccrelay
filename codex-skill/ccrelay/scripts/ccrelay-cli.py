@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -29,6 +30,7 @@ import ccrelay_ssh
 import ccrelay_identity
 import ccrelay_center
 import ccrelay_bootstrap
+import ccrelay_skill
 
 
 DEFAULT_CENTER_URL = "http://127.0.0.1:18191"
@@ -77,6 +79,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ccrelay_ssh.SshCredentialError as exc:
         print(f"ccrelay-cli: {exc}", file=sys.stderr)
         return 2
+    except ccrelay_skill.SkillError as exc:
+        print(f"ccrelay-cli: {exc}", file=sys.stderr)
+        return 2
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         print(f"ccrelay-cli: HTTP {exc.code} {exc.reason}: {body}", file=sys.stderr)
@@ -108,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_access(subparsers)
     add_agent(subparsers)
     add_config(subparsers)
+    ccrelay_skill.add_skill(subparsers)
     add_ssh(subparsers)
     add_observation(subparsers)
     add_deploy(subparsers)
@@ -192,8 +198,9 @@ def add_center(subparsers: argparse._SubParsersAction) -> None:
         ("bootstrap", "按规划自动部署并切换远端中心", center_bootstrap),
     ]:
         command = commands.add_parser(command_name, help=help_text)
-        command.add_argument("--node", action="append", dest="nodes", default=[],
-                             help="中心候选 SSH 节点，格式 host:port[=username]；可重复")
+        command.add_argument("--node", "--nodes", action="append", dest="nodes", default=[],
+                             help="中心候选 SSH 节点，格式 host:port[=username]；可重复或使用逗号分隔")
+        add_ssh_concurrency_option(command)
         command.add_argument("--selection", choices=["AUTO", "MANUAL"], default="AUTO")
         command.add_argument("--exclude", action="append", default=[], help="自动选择时排除 host 或 host:sshPort")
         command.add_argument("--port-start", type=int)
@@ -470,6 +477,7 @@ def add_ssh(subparsers: argparse._SubParsersAction) -> None:
         "--private-key-file", help="可选私钥路径；为空时使用系统 SSH config、Agent 或默认密钥。")
     set_passwordless_default.add_argument("--allow-cluster-mutual", type=parse_bool, default=True)
     set_passwordless_default.add_argument("--remote-directory")
+    add_ssh_parameter_options(set_passwordless_default)
     set_passwordless_default.set_defaults(func=ssh_config_set_passwordless_default)
 
     remove_default = config_commands.add_parser("remove-default", help="移除通用 SSH 凭据")
@@ -511,6 +519,19 @@ def add_ssh(subparsers: argparse._SubParsersAction) -> None:
     identity_status.add_argument("--cluster-id", default="default")
     identity_status.set_defaults(func=ssh_identity_status)
 
+    identity_targets = identity_commands.add_parser("targets", help="查看或显式修改部署目标节点集合")
+    target_commands = identity_targets.add_subparsers(dest="ssh_identity_target_command", required=True)
+    target_status = target_commands.add_parser("status", help="查看部署目标、成功、失败和已排除节点")
+    target_status.add_argument("--cluster-id", default="default")
+    target_status.set_defaults(func=lambda args: ccrelay_identity.target_status(args.cluster_id))
+    for action, help_text in [("add", "显式加入部署目标节点"), ("exclude", "显式排除部署目标节点")]:
+        command = target_commands.add_parser(action, help=help_text)
+        command.add_argument("--cluster-id", default="default")
+        command.add_argument("--node", "--nodes", action="append", dest="nodes", required=True)
+        command.add_argument("--confirm", type=parse_bool, default=False)
+        command.set_defaults(func=lambda args, selected=action: ccrelay_identity.update_target_nodes(
+            args.cluster_id, args.nodes, selected.upper(), args.confirm))
+
     for command_name, help_text, handler in [
         ("plan", "只读探测账号模式和所需权限", ssh_identity_plan),
         ("select", "保存用户确认的账号模式和专用账号详情", ssh_identity_select_mode),
@@ -536,6 +557,22 @@ def add_ssh_credential_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--enable-passwordless", type=parse_bool, default=True)
     parser.add_argument("--allow-cluster-mutual", type=parse_bool, default=True)
     parser.add_argument("--remote-directory")
+    add_ssh_parameter_options(parser)
+
+
+def add_ssh_parameter_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ssh-arguments-mode",
+        choices=[ccrelay_ssh.SSH_ARGUMENT_MODE_DEFAULT, ccrelay_ssh.SSH_ARGUMENT_MODE_USER_PROVIDED],
+        default=ccrelay_ssh.SSH_ARGUMENT_MODE_DEFAULT,
+        help="SSH 参数来源；USER_PROVIDED 时完全使用重复传入的 --ssh-argument。",
+    )
+    parser.add_argument(
+        "--ssh-argument",
+        action="append",
+        default=[],
+        help="用户 SSH 参数的单个 argv token；可重复传入，例如 --ssh-argument=-o --ssh-argument=StrictHostKeyChecking=no。",
+    )
 
 
 def add_ssh_target_options(parser: argparse.ArgumentParser) -> None:
@@ -548,8 +585,8 @@ def add_ssh_target_options(parser: argparse.ArgumentParser) -> None:
 def add_identity_target_options(parser: argparse.ArgumentParser, require_center: bool = True) -> None:
     parser.add_argument("--cluster-id", default="default")
     parser.add_argument("--center-node", required=require_center, help="中心 SSH 节点，格式 host:port[=username]")
-    parser.add_argument("--node", action="append", dest="nodes", required=True,
-                        help="受管节点，格式 host:port[=username]；可重复传入")
+    parser.add_argument("--node", "--nodes", action="append", dest="nodes", default=[],
+                        help="受管节点，格式 host:port[=username]；可重复传入或使用逗号分隔")
     parser.add_argument("--allow-create", type=parse_bool,
                         help="是否允许创建 Skill 专用账号；未提供时使用本地已保存策略")
     parser.add_argument("--dedicated-username", default=None)
@@ -558,6 +595,23 @@ def add_identity_target_options(parser: argparse.ArgumentParser, require_center:
                         help="确认专用账号名和部署目录预览后才允许继续")
     parser.add_argument("--operator-id", default=os.getenv("USERNAME") or os.getenv("USER"))
     parser.add_argument("--connect-timeout", type=int, default=15)
+    add_ssh_concurrency_option(parser)
+
+
+def add_ssh_concurrency_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--concurrency",
+        type=parse_ssh_concurrency,
+        default=ccrelay_identity.DEFAULT_SSH_CONCURRENCY,
+        help="SSH 多节点操作的最大并发数，范围 1-32，默认 4",
+    )
+
+
+def parse_ssh_concurrency(value: str) -> int:
+    try:
+        return ccrelay_identity.normalize_concurrency(value)
+    except ccrelay_ssh.SshCredentialError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def add_observation(subparsers: argparse._SubParsersAction) -> None:
@@ -617,6 +671,26 @@ def add_task(subparsers: argparse._SubParsersAction) -> None:
     create.add_argument("--payload-file")
     create.add_argument("--timeout-ms", type=int)
     create.set_defaults(func=task_create)
+
+    batch = commands.add_parser("create-batch", help="按有界并发创建多个 Relay 部署任务")
+    add_json_body_options(batch)
+    batch.add_argument(
+        "--target-node-ids", "--target-node-id", dest="target_node_ids", action="append", required=True,
+        help="部署目标 nodeId，支持重复传入或逗号分隔；每个目标创建一个独立 DEPLOY_RELAY 任务",
+    )
+    batch.add_argument("--session-id")
+    batch.add_argument("--request-id")
+    batch.add_argument("--parent-task-id")
+    batch.add_argument("--task-type", default="DEPLOY_RELAY")
+    batch.add_argument("--source-node-id")
+    batch.add_argument("--payload-json")
+    batch.add_argument("--payload-file")
+    batch.add_argument("--timeout-ms", type=int)
+    batch.add_argument(
+        "--concurrency", type=parse_ssh_concurrency, default=ccrelay_identity.DEFAULT_SSH_CONCURRENCY,
+        help="同时创建部署任务的最大并发数，范围 1-32，默认 4",
+    )
+    batch.set_defaults(func=task_create_batch)
 
     get = commands.add_parser("get", help="查看本地任务详情")
     get.add_argument("task_id")
@@ -888,6 +962,10 @@ def center_stop(args: argparse.Namespace) -> Any:
 
 
 def center_plan(args: argparse.Namespace) -> Any:
+    config = ccrelay_ssh.load_config()
+    if (config.get("clusterIdentity") or {}).get("targetNodes") or args.nodes:
+        nodes = ccrelay_identity.resolve_target_nodes(args.cluster_id, args.nodes, initialize=True)
+        args.nodes = ccrelay_identity.node_values(nodes)
     return ccrelay_center.plan(
         args.nodes,
         selection=args.selection,
@@ -899,6 +977,7 @@ def center_plan(args: argparse.Namespace) -> Any:
         manual_port=args.manual_port,
         manual_scheme=args.manual_scheme,
         manual_base_path=args.manual_base_path,
+        concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
     )
 
 
@@ -908,6 +987,11 @@ def center_bootstrap(args: argparse.Namespace) -> Any:
     )
     if not model_gate.get("ready"):
         return model_gate
+    if not getattr(args, "force_redeploy", False):
+        config = ccrelay_ssh.load_config()
+        if (config.get("clusterIdentity") or {}).get("targetNodes") or args.nodes:
+            nodes = ccrelay_identity.resolve_target_nodes(args.cluster_id, args.nodes, initialize=True)
+            args.nodes = ccrelay_identity.node_values(nodes)
     active = ccrelay_center.active_center_status(max(10, min(int(args.timeout), 30)))
     previous_remote_center = None
     if active is not None and getattr(args, "force_redeploy", False):
@@ -930,6 +1014,7 @@ def center_bootstrap(args: argparse.Namespace) -> Any:
             port_end=max(int(center_port), int(relay_port or center_port) + 1),
             timeout_seconds=args.connect_timeout,
             strict_explicit_nodes=True,
+            concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
         )
         if planned.get("status") != "CENTER_PLAN_READY":
             planned["previousRemoteCenter"] = previous_remote_center
@@ -983,9 +1068,9 @@ def center_bootstrap(args: argparse.Namespace) -> Any:
 def sync_identity_to_selected_center(args: argparse.Namespace, planned: Dict[str, Any]) -> Dict[str, Any]:
     config = ccrelay_ssh.load_config()
     identity = config.get("clusterIdentity") or {}
-    managed = identity.get("managedNodes") or []
+    managed = ccrelay_identity.active_target_nodes(config) or identity.get("managedNodes") or []
     if not managed:
-        return {"status": "NOT_APPLICABLE", "reason": "NO_PERSISTED_MANAGED_NODES"}
+        return {"status": "NOT_APPLICABLE", "reason": "NO_PERSISTED_TARGET_NODES"}
     node_values = []
     for item in managed:
         host = item.get("host")
@@ -1005,6 +1090,8 @@ def sync_identity_to_selected_center(args: argparse.Namespace, planned: Dict[str
         allow_create,
         dedicated_username,
         max(15, int(getattr(args, "connect_timeout", 15))),
+        concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
+        expected_target_nodes=ccrelay_identity.normalize_nodes(node_values),
     )
     if state.get("centerToNodeStatus") != "READY":
         raise CliError("远端中心切换后 SSH 身份验证未达到 READY")
@@ -1486,7 +1573,7 @@ def config_history(args: argparse.Namespace) -> Any:
 def ssh_config_set_default(args: argparse.Namespace) -> Any:
     password = read_ssh_password(
         args,
-        ["ssh", "config", "set-default", "--username", args.username, "--port", str(args.port)],
+        ssh_config_command_args(args, ["ssh", "config", "set-default", "--username", args.username, "--port", str(args.port)]),
         "DEFAULT",
     )
     return ccrelay_ssh.set_default_credential(
@@ -1496,6 +1583,8 @@ def ssh_config_set_default(args: argparse.Namespace) -> Any:
         args.enable_passwordless,
         args.allow_cluster_mutual,
         args.remote_directory,
+        args.ssh_arguments_mode,
+        args.ssh_argument,
     )
 
 
@@ -1506,13 +1595,15 @@ def ssh_config_set_passwordless_default(args: argparse.Namespace) -> Any:
         args.private_key_file,
         args.allow_cluster_mutual,
         args.remote_directory,
+        args.ssh_arguments_mode,
+        args.ssh_argument,
     )
 
 
 def ssh_config_set_node(args: argparse.Namespace) -> Any:
     password = read_ssh_password(
         args,
-        ["ssh", "config", "set-node", "--host", args.host, "--username", args.username, "--port", str(args.port)],
+        ssh_config_command_args(args, ["ssh", "config", "set-node", "--host", args.host, "--username", args.username, "--port", str(args.port)]),
         "NODE",
         args.host,
         args.port,
@@ -1525,7 +1616,18 @@ def ssh_config_set_node(args: argparse.Namespace) -> Any:
         args.enable_passwordless,
         args.allow_cluster_mutual,
         args.remote_directory,
+        args.ssh_arguments_mode,
+        args.ssh_argument,
     )
+
+
+def ssh_config_command_args(args: argparse.Namespace, command: List[str]) -> List[str]:
+    result = list(command)
+    if getattr(args, "ssh_arguments_mode", ccrelay_ssh.SSH_ARGUMENT_MODE_DEFAULT) != ccrelay_ssh.SSH_ARGUMENT_MODE_DEFAULT:
+        result.extend(["--ssh-arguments-mode", args.ssh_arguments_mode])
+    for value in getattr(args, "ssh_argument", []) or []:
+        result.append("--ssh-argument=" + str(value))
+    return result
 
 
 def read_ssh_password(
@@ -1564,6 +1666,7 @@ def bootstrap_next(args: argparse.Namespace) -> Any:
             "nextAction": "USE_REGISTERED_RELAY",
             "taskCreated": False,
         }
+    resolve_identity_target_args(args, initialize=True)
     result = ssh_identity_plan(args)
     if isinstance(result, dict):
         result["bootstrapStage"] = bootstrap_state["stage"]
@@ -1594,6 +1697,7 @@ def identity_capability_is_ready(state: Dict[str, Any]) -> bool:
 
 
 def ssh_identity_plan(args: argparse.Namespace) -> Any:
+    resolve_identity_target_args(args, initialize=True)
     config = ccrelay_ssh.load_config()
     if not config.get("default"):
         return identity_credentials_interaction(args, config)
@@ -1628,10 +1732,12 @@ def ssh_identity_plan(args: argparse.Namespace) -> Any:
         dedicated_username,
         args.connect_timeout,
         directory_template,
+        getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
     )
 
 
 def ssh_identity_apply(args: argparse.Namespace) -> Any:
+    resolve_identity_target_args(args, initialize=True)
     config = ccrelay_ssh.load_config()
     if not config.get("default"):
         return identity_credentials_interaction(args, config)
@@ -1664,6 +1770,7 @@ def ssh_identity_apply(args: argparse.Namespace) -> Any:
         dedicated_username,
         args.connect_timeout,
         remote_directory_template=directory_template,
+        concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
     )
     result["bootstrapExecutionMode"] = execution_mode
     if result.get("effectiveCapability"):
@@ -1681,6 +1788,7 @@ def ssh_identity_apply(args: argparse.Namespace) -> Any:
 
 
 def ssh_identity_verify(args: argparse.Namespace) -> Any:
+    resolve_identity_target_args(args, initialize=True)
     config = ccrelay_ssh.load_config()
     if not config.get("default"):
         return identity_credentials_interaction(args, config)
@@ -1698,7 +1806,10 @@ def ssh_identity_verify(args: argparse.Namespace) -> Any:
         allow_create,
         dedicated_username,
         args.connect_timeout,
+        concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
+        expected_target_nodes=ccrelay_identity.normalize_nodes(args.nodes),
     )
+    ccrelay_identity.persist_identity_outcome(result)
     result["persistence"] = persist_identity_state(args, result, "VERIFY")
     if identity_capability_is_ready(result):
         result["bootstrapStage"] = ccrelay_bootstrap.set_stage(
@@ -1707,6 +1818,7 @@ def ssh_identity_verify(args: argparse.Namespace) -> Any:
 
 
 def ssh_identity_select_mode(args: argparse.Namespace) -> Any:
+    resolve_identity_target_args(args, initialize=True)
     config = ccrelay_ssh.load_config()
     if not config.get("default"):
         return identity_credentials_interaction(args, config)
@@ -1747,6 +1859,7 @@ def ssh_identity_select_mode(args: argparse.Namespace) -> Any:
 
 
 def ssh_identity_rotate_key(args: argparse.Namespace) -> Any:
+    resolve_identity_target_args(args, initialize=True)
     config = ccrelay_ssh.load_config()
     if not config.get("default"):
         return identity_credentials_interaction(args, config)
@@ -1769,6 +1882,7 @@ def ssh_identity_rotate_key(args: argparse.Namespace) -> Any:
         args.connect_timeout,
         rotate_key=True,
         remote_directory_template=directory_template,
+        concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
     )
     if result.get("effectiveCapability"):
         result["persistence"] = persist_identity_state(args, result, "ROTATE_KEY")
@@ -1905,13 +2019,29 @@ def identity_credentials_interaction(args: argparse.Namespace, config: Dict[str,
 
 def validate_identity_credentials(args: argparse.Namespace, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     nodes = ccrelay_identity.normalize_nodes(args.nodes, args.center_node)
-    results = [
-        ccrelay_ssh.probe_connection(
+    def probe(node: Dict[str, Any]) -> Dict[str, Any]:
+        result = ccrelay_ssh.probe_connection(
             node["host"], node["port"], node.get("username"), args.connect_timeout)
-        for node in nodes
-    ]
+        return {"host": node["host"], "port": node["port"], **result}
+
+    def probe_error(node: Dict[str, Any], exc: Exception) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "host": node["host"],
+            "port": node["port"],
+            "failureType": "SSH_PROBE_FAILED",
+            "summary": str(exc),
+        }
+
+    results = ccrelay_identity.parallel_map_ordered(
+        nodes,
+        probe,
+        getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
+        probe_error,
+    )
     failures = [result for result in results if not result.get("success")]
     if not failures:
+        ccrelay_identity.persist_failed_nodes([])
         return None
     node_credentials = config.get("nodes") or {}
     failed_nodes = []
@@ -1924,37 +2054,72 @@ def validate_identity_credentials(args: argparse.Namespace, config: Dict[str, An
             "failureType": result.get("failureType") or "SSH_CONNECTION_FAILED",
             "summary": result.get("summary") or "SSH 连接验证失败",
         })
+    ccrelay_identity.persist_failed_nodes(failed_nodes)
+    authentication_failures = [
+        item for item in failed_nodes if item["failureType"] == "AUTHENTICATION_FAILED"
+    ]
+    connection_failures = [
+        item for item in failed_nodes if item["failureType"] != "AUTHENTICATION_FAILED"
+    ]
+    options = []
+    if authentication_failures:
+        options.extend([
+            {"id": "CONFIGURE_NODE_OVERRIDES", "label": "为认证失败节点配置独立 SSH 凭据（推荐）", "recommended": True},
+            {"id": "UPDATE_DEFAULT_CREDENTIAL", "label": "更新通用 SSH 凭据并重测全部节点", "recommended": False},
+        ])
+    if connection_failures:
+        options.extend([
+            {"id": "RETRY_UNREACHABLE_NODES", "label": "重试当前不可达节点", "recommended": not authentication_failures},
+            {"id": "KEEP_FAILED_NODES", "label": "保留在部署范围，稍后重试", "recommended": False},
+            {"id": "EXCLUDE_FAILED_NODES", "label": "确认从部署范围移除所选节点", "recommended": False,
+             "command": "<CLI> ssh identity targets exclude --node <host:port> --confirm true"},
+        ])
+    options.extend([
+        {"id": "RETRY_VALIDATION", "label": "不修改配置，重新验证全部节点", "recommended": False},
+        {"id": "CANCEL", "label": "取消配置", "recommended": False},
+    ])
+    fields = []
+    if authentication_failures:
+        fields.append({
+            "name": "nodeOverrides",
+            "label": "认证失败节点独立 SSH 凭据",
+            "required": True,
+            "default": [
+                {"node": item["node"], "username": None, "password": None}
+                for item in authentication_failures
+            ],
+            "secret": True,
+            "itemFields": ["node", "username", "password"],
+        })
     return identity_interaction_payload({
         "status": "NEED_USER_INPUT",
         "stage": "SSH_CREDENTIALS_INVALID",
         "taskCreated": False,
         "prompt": "SSH 凭据尚未通过全部节点验证。请更新通用凭据，或为失败节点配置 ip:port 级独立凭据。",
-        "options": [
-            {"id": "CONFIGURE_NODE_OVERRIDES", "label": "为失败节点配置独立 SSH 凭据（推荐）", "recommended": True},
-            {"id": "UPDATE_DEFAULT_CREDENTIAL", "label": "更新通用 SSH 凭据并重测全部节点", "recommended": False},
-            {"id": "RETRY_VALIDATION", "label": "不修改凭据，重新验证", "recommended": False},
-            {"id": "CANCEL", "label": "取消配置", "recommended": False},
-        ],
-        "fields": [{
-            "name": "nodeOverrides",
-            "label": "失败节点独立 SSH 凭据",
-            "required": True,
-            "default": [
-                {"node": item["node"], "username": None, "password": None}
-                for item in failed_nodes
-            ],
-            "secret": True,
-            "itemFields": ["node", "username", "password"],
-        }],
+        "options": options,
+        "fields": fields,
         "validation": {
             "allNodesValid": False,
             "nodeCount": len(results),
             "failedNodeCount": len(failures),
             "failedNodes": failed_nodes,
+            "authenticationFailureCount": len(authentication_failures),
+            "connectionFailureCount": len(connection_failures),
         },
         "currentPolicy": identity_policy_summary(config),
         "resume": "保存凭据后重新执行原 ssh identity 命令；只有全部节点验证通过后才会进入账号模式选择。",
     })
+
+
+def resolve_identity_target_args(args: argparse.Namespace, initialize: bool) -> List[Dict[str, Any]]:
+    nodes = ccrelay_identity.resolve_target_nodes(
+        args.cluster_id,
+        getattr(args, "nodes", []) or [],
+        getattr(args, "center_node", None),
+        initialize,
+    )
+    args.nodes = ccrelay_identity.node_values(nodes)
+    return nodes
 
 
 def resolve_identity_details(args: argparse.Namespace, config: Dict[str, Any]) -> tuple[str, str]:
@@ -2237,6 +2402,7 @@ def prepare_center_ssh(args: argparse.Namespace) -> Any:
             "port": args.port,
             "username": selected_username,
             "timeoutMs": args.connect_timeout * 1000,
+            "sshArguments": ccrelay_ssh.ssh_arguments_for(args.host, args.port),
         },
     )
     success = isinstance(center_result, dict) and center_result.get("status") == "READY"
@@ -2313,20 +2479,176 @@ def task_create(args: argparse.Namespace) -> Any:
             return blocked
         if not str(session_id or "").strip():
             session_id = open_deployment_session(args, payload)
-    request_body.update(
+    return submit_task_create(
+        args, request_body, session_id, task_type, args.target_node_id, payload,
+        task_id=args.task_id, request_id=args.request_id, parent_task_id=args.parent_task_id,
+        source_node_id=args.source_node_id, timeout_ms=args.timeout_ms,
+    )
+
+
+def submit_task_create(
+    args: argparse.Namespace,
+    request_body: Dict[str, Any],
+    session_id: str,
+    task_type: str,
+    target_node_id: Optional[str],
+    payload: Any,
+    *,
+    task_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    parent_task_id: Optional[str] = None,
+    source_node_id: Optional[str] = None,
+    timeout_ms: Optional[int] = None,
+) -> Any:
+    body = dict(request_body)
+    body.update(
         compact_dict({
-            "taskId": args.task_id,
+            "taskId": task_id,
             "sessionId": session_id,
-            "requestId": args.request_id,
-            "parentTaskId": args.parent_task_id,
+            "requestId": request_id,
+            "parentTaskId": parent_task_id,
             "taskType": task_type,
-            "sourceNodeId": args.source_node_id,
-            "targetNodeId": args.target_node_id,
+            "sourceNodeId": source_node_id,
+            "targetNodeId": target_node_id,
             "payload": payload,
-            "timeoutMs": args.timeout_ms,
+            "timeoutMs": timeout_ms,
         })
     )
-    return request_json(args, "POST", "/api/skill/tasks/create", body=request_body)
+    return request_json(args, "POST", "/api/skill/tasks/create", body=body)
+
+
+def normalize_batch_target_node_ids(values: Iterable[str]) -> List[str]:
+    targets: List[str] = []
+    seen = set()
+    for value in values or []:
+        for item in str(value).split(","):
+            target = item.strip()
+            if not target or target in seen:
+                continue
+            if ":" not in target:
+                raise CliError(f"target node id must include relay port: {target}")
+            seen.add(target)
+            targets.append(target)
+    if not targets:
+        raise CliError("at least one target node id is required")
+    return targets
+
+
+def _batch_target_preflight(
+    args: argparse.Namespace, target_node_id: str, payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    child_args = argparse.Namespace(**vars(args))
+    child_args.target_node_id = target_node_id
+    try:
+        return deploy_ssh_preflight(child_args, payload)
+    except Exception as exc:
+        return {
+            "success": False,
+            "status": "PREFLIGHT_FAILED",
+            "taskCreated": False,
+            "failureType": "SSH_PREFLIGHT_EXCEPTION",
+            "summary": str(exc),
+        }
+
+
+def task_create_batch(args: argparse.Namespace) -> Any:
+    request_body = body_from_json_options(args)
+    task_type = str(args.task_type or request_body.get("taskType") or "DEPLOY_RELAY").upper()
+    if task_type != "DEPLOY_RELAY":
+        raise CliError("task create-batch only supports --task-type DEPLOY_RELAY")
+    target_node_ids = normalize_batch_target_node_ids(args.target_node_ids)
+    concurrency = ccrelay_identity.normalize_concurrency(args.concurrency)
+    payload_template = json_source(args.payload_json, args.payload_file) or {}
+    if not isinstance(payload_template, dict):
+        raise CliError("deployment payload must be a JSON object")
+
+    batch_id = str(uuid.uuid4())
+    session_id = args.session_id or request_body.get("sessionId")
+    prepared: List[Dict[str, Any]] = []
+    for index, target_node_id in enumerate(target_node_ids):
+        payload = copy.deepcopy(payload_template)
+        child_args = argparse.Namespace(**vars(args))
+        child_args.target_node_id = target_node_id
+        enrich_deploy_payload(child_args, payload)
+        prepared.append({
+            "index": index,
+            "targetNodeId": target_node_id,
+            "payload": payload,
+        })
+
+    registration_checked = False
+    for item in prepared:
+        deploy_mode = str(item["payload"].get("deployMode") or "CENTER_DEPLOY").upper()
+        if deploy_mode == "SELF_REPLICATE":
+            continue
+        child_args = argparse.Namespace(**vars(args))
+        child_args.target_node_id = item["targetNodeId"]
+        blocked = deploy_registration_preflight(child_args, item["payload"])
+        args.center = child_args.center
+        args.center_configured_by = getattr(child_args, "center_configured_by", getattr(args, "center_configured_by", "BATCH"))
+        if blocked is not None:
+            return {
+                "batchId": batch_id,
+                "status": "PREPARATION_FAILED",
+                "concurrency": concurrency,
+                "targetCount": len(target_node_ids),
+                "results": [
+                    {"targetNodeId": target, "status": "NOT_SUBMITTED", "reason": blocked}
+                    for target in target_node_ids
+                ],
+            }
+        registration_checked = True
+        break
+    for item in prepared:
+        apply_center_endpoints(item["payload"], args.center)
+
+    if not session_id:
+        session_id = open_deployment_session(args, payload_template)
+
+    if registration_checked:
+        def preflight_result(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            mode = str(item["payload"].get("deployMode") or "CENTER_DEPLOY").upper()
+            if mode != "CENTER_DEPLOY":
+                return None
+            return _batch_target_preflight(args, item["targetNodeId"], item["payload"])
+
+        preflight_results = ccrelay_identity.parallel_map_ordered(prepared, preflight_result, concurrency)
+    else:
+        preflight_results = [None] * len(prepared)
+
+    def create_item(item_and_preflight: Any) -> Dict[str, Any]:
+        item, preflight = item_and_preflight
+        target_node_id = item["targetNodeId"]
+        if preflight is not None:
+            return {"targetNodeId": target_node_id, "status": preflight.get("status", "PREFLIGHT_FAILED"),
+                    "taskCreated": False, "preflight": preflight}
+        task_id = str(uuid.uuid4())
+        request_id = f"{args.request_id or batch_id}-{item['index']}"
+        try:
+            response = submit_task_create(
+                args, request_body, session_id, task_type, target_node_id, item["payload"],
+                task_id=task_id, request_id=request_id, parent_task_id=args.parent_task_id,
+                source_node_id=args.source_node_id, timeout_ms=args.timeout_ms,
+            )
+            response_task_id = response.get("taskId") if isinstance(response, dict) else None
+            return {"targetNodeId": target_node_id, "status": "CREATED", "taskCreated": True,
+                    "taskId": response_task_id or task_id, "response": response}
+        except Exception as exc:
+            return {"targetNodeId": target_node_id, "status": "CREATE_FAILED", "taskCreated": False,
+                    "taskId": task_id, "error": str(exc)}
+
+    results = ccrelay_identity.parallel_map_ordered(
+        list(zip(prepared, preflight_results)), create_item, concurrency,
+    )
+    return {
+        "batchId": batch_id,
+        "sessionId": session_id,
+        "taskType": task_type,
+        "concurrency": concurrency,
+        "targetCount": len(target_node_ids),
+        "createdCount": sum(1 for result in results if result.get("taskCreated")),
+        "results": results,
+    }
 
 
 def open_deployment_session(args: argparse.Namespace, payload: Any) -> str:
@@ -2353,6 +2675,7 @@ def enrich_deploy_payload(args: argparse.Namespace, payload: Any) -> None:
     """Fill deployment-only fields from center identity, with bootstrap fallback."""
     if not isinstance(payload, dict):
         return
+    payload.setdefault("replaceExistingRelay", True)
     target_node_id = str(getattr(args, "target_node_id", "") or "").strip()
     if not target_node_id or ":" not in target_node_id:
         return
@@ -2574,7 +2897,7 @@ def deploy_ssh_preflight(args: argparse.Namespace, payload: Any) -> Optional[Dic
     result["taskCreated"] = False
     result["blockedCommand"] = "task create"
     result["deployMode"] = deploy_mode
-    result["enableCenterFallback"] = center_fallback
+    result["enableCenterFallback"] = bool(deploy_payload.get("enableCenterFallback", False))
     return result
 
 

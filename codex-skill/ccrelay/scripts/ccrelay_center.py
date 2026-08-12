@@ -222,7 +222,8 @@ def discover_candidates(explicit_nodes: Iterable[str], payload: Optional[Dict[st
         values.append(f"{target_host}:{target_port}" + (f"={target_user}" if target_user else ""))
     config = ccrelay_ssh.load_config()
     identity = config.get("clusterIdentity") or {}
-    for item in identity.get("managedNodes") or []:
+    persisted_targets = ccrelay_identity.active_target_nodes(config)
+    for item in persisted_targets or identity.get("managedNodes") or []:
         host = item.get("host")
         port = item.get("port") or 22
         username = item.get("bootstrapUsername")
@@ -231,11 +232,9 @@ def discover_candidates(explicit_nodes: Iterable[str], payload: Optional[Dict[st
     if not values:
         for node_key in ((identity.get("dedicatedAccount") or {}).get("passwordSecrets") or {}).keys():
             values.append(str(node_key))
-    nodes: Dict[str, Dict[str, Any]] = {}
-    for value in values:
-        node = ccrelay_identity.parse_node(value)
-        nodes[node["nodeKey"]] = node
-    return [nodes[key] for key in sorted(nodes)]
+    if not values:
+        return []
+    return ccrelay_identity.normalize_nodes(values)
 
 
 def recovery_plan(explicit_nodes: Iterable[str]) -> Optional[Dict[str, Any]]:
@@ -289,6 +288,7 @@ def plan(
     manual_scheme: str = "http",
     manual_base_path: str = "",
     strict_explicit_nodes: bool = False,
+    concurrency: int = ccrelay_identity.DEFAULT_SSH_CONCURRENCY,
 ) -> Dict[str, Any]:
     if str(selection or "AUTO").upper() == "MANUAL" and not manual_host:
         return manual_interaction()
@@ -317,10 +317,19 @@ def plan(
         ]
     if not candidates:
         return no_candidate_interaction("没有可用于自动选择的远端节点。")
-    probed = [
-        probe_candidate(item, selected_port_start, selected_port_end, timeout_seconds, config)
-        for item in candidates
-    ]
+    concurrency = ccrelay_identity.normalize_concurrency(concurrency)
+    probed = ccrelay_identity.parallel_map_ordered(
+        candidates,
+        lambda item: probe_candidate(
+            item, selected_port_start, selected_port_end, timeout_seconds, config),
+        concurrency,
+        lambda item, exc: {
+            **item,
+            "probeSuccess": False,
+            "failureType": "RESOURCE_PROBE_FAILED",
+            "summary": str(exc),
+        },
+    )
     minimum_memory = int(center_config.get("minimumMemoryMb") or DEFAULT_MIN_MEMORY_MB)
     minimum_disk = int(center_config.get("minimumDiskMb") or DEFAULT_MIN_DISK_MB)
     for item in probed:

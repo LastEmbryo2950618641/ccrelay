@@ -12,10 +12,11 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from contextlib import redirect_stdout
-from unittest.mock import patch
+from unittest.mock import call, patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -341,6 +342,11 @@ class CcRelayCliTest(unittest.TestCase):
         RecordingHandler.records.clear()
         RecordingHandler.task_get_count = 0
         self.temporary_directory = tempfile.TemporaryDirectory()
+        self.skill_root_patch = patch.dict(
+            os.environ,
+            {"CCRELAY_SKILL_ROOT": self.temporary_directory.name},
+        )
+        self.skill_root_patch.start()
         self.ssh_config_path = Path(self.temporary_directory.name) / "ssh-credentials.json"
         self.bootstrap_db_path = Path(self.temporary_directory.name) / "bootstrap-state.db"
         self.fake_bin = Path(self.temporary_directory.name) / "bin"
@@ -362,6 +368,7 @@ class CcRelayCliTest(unittest.TestCase):
             fake_ssh.chmod(0o700)
 
     def tearDown(self):
+        self.skill_root_patch.stop()
         self.temporary_directory.cleanup()
 
     def test_production_default_center_is_local(self):
@@ -452,6 +459,311 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertNotIn("defaultUsername", output["verbatimResponse"])
         self.assertNotIn("set-passwordless-default", output["verbatimResponse"])
         self.assertFalse(self.bootstrap_db_path.exists())
+
+    def test_bootstrap_next_accepts_comma_separated_nodes_alias(self):
+        output = self.run_cli(
+            "bootstrap", "next", "--nodes", "192.0.2.10:22, 192.0.2.11:2222")
+
+        self.assertEqual(
+            ["192.0.2.10:22", "192.0.2.11:2222"],
+            [item["node"] for item in output["fields"][4]["default"]],
+        )
+
+    def test_bootstrap_next_persists_complete_target_scope_before_credentials(self):
+        output = self.run_cli(
+            "bootstrap", "next", "--nodes",
+            "192.0.2.10:22,192.0.2.11:22,192.0.2.12:22",
+        )
+
+        self.assertEqual("SSH_CREDENTIALS_REQUIRED", output["stage"])
+        config = json.loads(self.ssh_config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            ["192.0.2.10:22", "192.0.2.11:22", "192.0.2.12:22"],
+            [item["nodeKey"] for item in config["clusterIdentity"]["targetNodes"]],
+        )
+        self.assertEqual([], config["clusterIdentity"]["managedNodes"])
+
+    def test_identity_command_subset_reuses_persisted_complete_target_scope(self):
+        with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}):
+            ccrelay_identity.resolve_target_nodes(
+                "default",
+                ["192.0.2.10:22,192.0.2.11:22,192.0.2.12:22"],
+            )
+            args = argparse.Namespace(
+                cluster_id="default", nodes=["192.0.2.10:22"], center_node=None,
+            )
+            resolved = ccrelay_cli.resolve_identity_target_args(args, initialize=True)
+
+        self.assertEqual(3, len(resolved))
+        self.assertEqual(
+            ["192.0.2.10:22", "192.0.2.11:22", "192.0.2.12:22"],
+            args.nodes,
+        )
+
+    def test_identity_target_exclusion_requires_explicit_confirmation(self):
+        with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}):
+            ccrelay_identity.resolve_target_nodes(
+                "default", ["192.0.2.10:22,192.0.2.11:22"])
+            with self.assertRaises(ccrelay_ssh.SshCredentialError):
+                ccrelay_identity.update_target_nodes(
+                    "default", ["192.0.2.11:22"], "EXCLUDE", False)
+            unchanged = ccrelay_identity.target_status()
+            changed = ccrelay_identity.update_target_nodes(
+                "default", ["192.0.2.11:22"], "EXCLUDE", True)
+
+        self.assertEqual(2, unchanged["activeTargetNodeCount"])
+        self.assertEqual(1, changed["activeTargetNodeCount"])
+        self.assertEqual(1, changed["excludedNodeCount"])
+
+    def test_failed_nodes_remain_in_active_target_scope(self):
+        with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}):
+            ccrelay_identity.resolve_target_nodes(
+                "default", ["192.0.2.10:22,192.0.2.11:22"])
+            ccrelay_identity.persist_failed_nodes([{
+                "node": "192.0.2.11:22",
+                "failureType": "NETWORK_UNREACHABLE",
+                "summary": "unreachable",
+            }])
+            status = ccrelay_identity.target_status()
+
+        self.assertEqual(2, status["activeTargetNodeCount"])
+        self.assertEqual(1, status["failedNodeCount"])
+        self.assertEqual("192.0.2.11:22", status["failedNodes"][0]["nodeKey"])
+
+    def test_legacy_managed_nodes_are_migrated_to_target_scope_on_load(self):
+        self.ssh_config_path.write_text(json.dumps({
+            "clusterIdentity": {
+                "managedNodes": [{
+                    "host": "192.0.2.10", "port": 22,
+                    "nodeKey": "192.0.2.10:22", "bootstrapUsername": "tester",
+                }],
+            },
+        }), encoding="utf-8")
+        with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}):
+            config = ccrelay_ssh.load_config()
+
+        self.assertEqual(
+            ["192.0.2.10:22"],
+            [item["nodeKey"] for item in config["clusterIdentity"]["targetNodes"]],
+        )
+        self.assertEqual("tester", config["clusterIdentity"]["targetNodes"][0]["username"])
+
+    def test_normalize_nodes_accepts_repeated_and_comma_separated_values(self):
+        nodes = ccrelay_identity.normalize_nodes([
+            "192.0.2.10:22,192.0.2.11:2222=tester",
+            "192.0.2.10:22",
+        ])
+
+        self.assertEqual(["192.0.2.10:22", "192.0.2.11:2222"], [item["nodeKey"] for item in nodes])
+        self.assertEqual("tester", nodes[1]["username"])
+
+    def test_multi_node_commands_accept_concurrency(self):
+        with patch.object(ccrelay_cli, "_center_hmac_secret", return_value="test-secret"):
+            parser = ccrelay_cli.build_parser()
+        bootstrap = parser.parse_args([
+            "bootstrap", "next", "--nodes", "192.0.2.10:22,192.0.2.11:22",
+            "--concurrency", "2",
+        ])
+        identity = parser.parse_args([
+            "ssh", "identity", "verify", "--center-node", "192.0.2.10:22",
+            "--nodes", "192.0.2.10:22,192.0.2.11:22", "--concurrency", "3",
+        ])
+        center = parser.parse_args([
+            "center", "plan", "--nodes", "192.0.2.10:22,192.0.2.11:22",
+            "--concurrency", "4",
+        ])
+
+        self.assertEqual(2, bootstrap.concurrency)
+        self.assertEqual(3, identity.concurrency)
+        self.assertEqual(4, center.concurrency)
+
+    def test_concurrency_rejects_values_outside_supported_range(self):
+        with patch.object(ccrelay_cli, "_center_hmac_secret", return_value="test-secret"):
+            parser = ccrelay_cli.build_parser()
+        for value in ("0", "33", "invalid"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                parser.parse_args([
+                    "bootstrap", "next", "--node", "192.0.2.10:22",
+                    "--concurrency", value,
+                ])
+
+    def test_parallel_map_is_bounded_ordered_and_failure_isolated(self):
+        lock = threading.Lock()
+        running = 0
+        peak = 0
+
+        def operation(value):
+            nonlocal running, peak
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            try:
+                time.sleep(0.03)
+                if value == 2:
+                    raise RuntimeError("node failed")
+                return value * 10
+            finally:
+                with lock:
+                    running -= 1
+
+        result = ccrelay_identity.parallel_map_ordered(
+            [1, 2, 3, 4], operation, 2,
+            lambda value, exc: f"{value}:{exc}",
+        )
+
+        self.assertEqual([10, "2:node failed", 30, 40], result)
+        self.assertEqual(2, peak)
+
+    def test_identity_plan_runs_node_probes_with_configured_concurrency(self):
+        lock = threading.Lock()
+        running = 0
+        peak = 0
+
+        def probe_connection(host, _port, username, _timeout):
+            nonlocal running, peak
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            try:
+                time.sleep(0.03)
+                return {"success": True, "status": "READY", "username": username or "tester"}
+            finally:
+                with lock:
+                    running -= 1
+
+        capability = {"osType": "LINUX", "canCreateAccount": True, "canInstallKey": True}
+        with patch.object(ccrelay_ssh, "probe_connection", side_effect=probe_connection), \
+                patch.object(ccrelay_identity, "probe_environment", return_value=capability):
+            result = ccrelay_identity.plan(
+                "default",
+                "192.0.2.10:22",
+                ["192.0.2.10:22,192.0.2.11:22,192.0.2.12:22"],
+                True,
+                "ccrelay",
+                10,
+                concurrency=2,
+            )
+
+        self.assertEqual("READY_TO_APPLY", result["status"])
+        self.assertEqual(
+            ["192.0.2.10:22", "192.0.2.11:22", "192.0.2.12:22"],
+            [item["nodeKey"] for item in result["nodes"]],
+        )
+        self.assertEqual(2, peak)
+
+    def test_identity_full_mesh_verification_uses_same_concurrency_limit(self):
+        nodes = [
+            {
+                "host": f"192.0.2.{index}", "port": 22,
+                "nodeKey": f"192.0.2.{index}:22", "bootstrapUsername": "tester",
+                "runtimeUsername": "ccrelay",
+                "privilegeSummary": {"shPath": "/bin/sh", "sshPath": "/usr/bin/ssh"},
+            }
+            for index in (10, 11, 12)
+        ]
+        lock = threading.Lock()
+        running = 0
+        peak = 0
+
+        def run_command(*_args, **_kwargs):
+            nonlocal running, peak
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            try:
+                time.sleep(0.02)
+                return {"success": True, "latencyMs": 20, "summary": ""}
+            finally:
+                with lock:
+                    running -= 1
+
+        with patch.object(ccrelay_identity, "ensure_cluster_key", return_value=Path("cluster-key")), \
+                patch.object(ccrelay_ssh, "ssh_arguments_for", return_value=[]), \
+                patch.object(ccrelay_ssh, "run_authenticated_command", side_effect=run_command):
+            result = ccrelay_identity.verify(
+                "default", "192.0.2.10:22", nodes, True, "ccrelay", 10,
+                "SHA256:test", "SHARED_KEYPAIR", concurrency=2)
+
+        self.assertEqual("FULL_MESH", result["effectiveCapability"])
+        self.assertEqual(6, len(result["trustEdges"]))
+        self.assertEqual(
+            [
+                ("192.0.2.10:22", "192.0.2.11:22"),
+                ("192.0.2.10:22", "192.0.2.12:22"),
+                ("192.0.2.11:22", "192.0.2.10:22"),
+                ("192.0.2.11:22", "192.0.2.12:22"),
+                ("192.0.2.12:22", "192.0.2.10:22"),
+                ("192.0.2.12:22", "192.0.2.11:22"),
+            ],
+            [(item["sourceNodeKey"], item["targetNodeKey"]) for item in result["trustEdges"]],
+        )
+        self.assertEqual(2, peak)
+
+    def test_persisted_multi_node_scope_cannot_be_full_mesh_from_one_node_result(self):
+        config = ccrelay_ssh.default_config()
+        config["clusterIdentity"]["targetNodes"] = [
+            {"host": "192.0.2.10", "port": 22, "nodeKey": "192.0.2.10:22"},
+            {"host": "192.0.2.11", "port": 22, "nodeKey": "192.0.2.11:22"},
+            {"host": "192.0.2.12", "port": 22, "nodeKey": "192.0.2.12:22"},
+        ]
+        node = {
+            "host": "192.0.2.10", "port": 22, "nodeKey": "192.0.2.10:22",
+            "bootstrapUsername": "tester", "runtimeUsername": "ccrelay",
+            "privilegeSummary": {"shPath": "/bin/sh", "sshPath": "/usr/bin/ssh"},
+        }
+        with patch.object(ccrelay_identity, "ensure_cluster_key", return_value=Path("cluster-key")), \
+                patch.object(ccrelay_identity.ccrelay_ssh, "load_config", return_value=config):
+            result = ccrelay_identity.verify(
+                "default", "192.0.2.10:22", [node], True, "ccrelay", 10,
+                "SHA256:test", "SHARED_KEYPAIR",
+                expected_target_nodes=config["clusterIdentity"]["targetNodes"])
+
+        self.assertEqual("DEGRADED", result["effectiveCapability"])
+        self.assertEqual(3, result["targetNodeCount"])
+        self.assertEqual(1, result["verifiedNodeCount"])
+        self.assertEqual(6, result["expectedTrustEdgeCount"])
+        self.assertEqual(0, result["verifiedTrustEdgeCount"])
+
+    def test_two_node_full_mesh_requires_both_directed_edges(self):
+        nodes = [
+            {
+                "host": f"192.0.2.{index}", "port": 22,
+                "nodeKey": f"192.0.2.{index}:22", "bootstrapUsername": "tester",
+                "runtimeUsername": "ccrelay",
+                "privilegeSummary": {"shPath": "/bin/sh", "sshPath": "/usr/bin/ssh"},
+            }
+            for index in (10, 11)
+        ]
+        responses = [
+            {"success": True, "latencyMs": 1, "summary": ""},
+            {"success": True, "latencyMs": 1, "summary": ""},
+            {"success": False, "latencyMs": 1, "summary": "failed"},
+        ]
+        with patch.object(ccrelay_identity, "ensure_cluster_key", return_value=Path("cluster-key")), \
+                patch.object(ccrelay_ssh, "ssh_arguments_for", return_value=[]), \
+                patch.object(ccrelay_ssh, "run_authenticated_command", side_effect=responses), \
+                patch.object(ccrelay_ssh, "run_key_command", return_value={
+                    "success": False, "latencyMs": 1, "summary": "failed",
+                }):
+            result = ccrelay_identity.verify(
+                "default", "192.0.2.10:22", nodes, True, "ccrelay", 10,
+                "SHA256:test", "SHARED_KEYPAIR", concurrency=1)
+
+        self.assertEqual("CENTER_ONLY", result["effectiveCapability"])
+        self.assertEqual(2, result["expectedTrustEdgeCount"])
+        self.assertEqual(1, result["verifiedTrustEdgeCount"])
+
+    def test_center_candidates_accept_comma_separated_nodes(self):
+        with patch.object(ccrelay_center.ccrelay_ssh, "load_config", return_value={}):
+            candidates = ccrelay_center.discover_candidates([
+                "192.0.2.10:22,192.0.2.11:2222=tester",
+            ])
+
+        self.assertEqual(
+            ["192.0.2.10:22", "192.0.2.11:2222"],
+            [item["nodeKey"] for item in candidates],
+        )
+        self.assertEqual("tester", candidates[1]["username"])
 
     def test_bootstrap_stage_set_get_and_reset(self):
         with patch.dict(os.environ, {"CCRELAY_BOOTSTRAP_DB": str(self.bootstrap_db_path)}):
@@ -719,6 +1031,54 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertEqual("EXISTING_PASSWORDLESS", stored["credentialSource"])
         self.assertNotIn("password", stored)
         self.assertNotIn("protectedPassword", stored)
+
+    def test_ssh_config_can_use_user_provided_arguments_without_default_options(self):
+        output = self.run_cli(
+            "ssh",
+            "config",
+            "set-passwordless-default",
+            "--username",
+            "existing-user",
+            "--port",
+            "22",
+            "--ssh-arguments-mode",
+            "USER_PROVIDED",
+            "--ssh-argument=-o",
+            "--ssh-argument=StrictHostKeyChecking=no",
+            "--ssh-argument=-o",
+            "--ssh-argument=ConnectTimeout=8",
+        )
+
+        self.assertEqual("USER_PROVIDED", output["sshArgumentsMode"])
+        self.assertEqual(4, output["sshArgumentCount"])
+        completed = subprocess.CompletedProcess([], 0, stdout="CCRELAY_SSH_OK", stderr="")
+        with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}), \
+                patch.object(ccrelay_ssh.shutil, "which", return_value="ssh"), \
+                patch.object(ccrelay_ssh.subprocess, "run", return_value=completed) as run_command:
+            result = ccrelay_ssh.run_authenticated_command(
+                "192.0.2.10", 22, "existing-user", "printf ok")
+
+        command = run_command.call_args.args[0]
+        self.assertTrue(result["success"])
+        self.assertIn("StrictHostKeyChecking=no", command)
+        self.assertIn("ConnectTimeout=8", command)
+        self.assertNotIn("StrictHostKeyChecking=accept-new", command)
+        self.assertNotIn("ConnectionAttempts=1", command)
+        self.assertNotIn("BatchMode=yes", command)
+
+    def test_default_ssh_and_scp_arguments_use_legacy_host_key_compatible_mode(self):
+        credential = {"username": "tester", "authenticationMode": "PUBLIC_KEY"}
+        completed = subprocess.CompletedProcess([], 0, stdout="CCRELAY_SSH_OK", stderr="")
+        with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}), \
+                patch.object(ccrelay_ssh, "resolve_credential", return_value=(credential, "DEFAULT")), \
+                patch.object(ccrelay_ssh.shutil, "which", return_value="ssh"), \
+                patch.object(ccrelay_ssh.subprocess, "run", return_value=completed) as run_command:
+            ccrelay_ssh._run_ssh("192.0.2.10", 22, "tester", 10)
+            ccrelay_ssh._run_scp("192.0.2.10", 22, "tester", ["source"], "/tmp/target", 10)
+
+        commands = [call.args[0] for call in run_command.call_args_list]
+        self.assertTrue(all("StrictHostKeyChecking=no" in command for command in commands))
+        self.assertTrue(all("StrictHostKeyChecking=accept-new" not in command for command in commands))
 
     def test_existing_passwordless_default_uses_configured_private_key_without_password_fallback(self):
         private_key = Path(self.temporary_directory.name) / "existing-key"
@@ -1111,6 +1471,43 @@ class CcRelayCliTest(unittest.TestCase):
             run_command.call_args.args[3],
         )
 
+    def test_identity_plan_does_not_treat_inaccessible_managed_account_as_conflict(self):
+        capability = {
+            "osType": "LINUX",
+            "canCreateAccount": False,
+            "canInstallKey": False,
+            "dedicatedExists": "true",
+            "dedicatedInspection": "INACCESSIBLE",
+            "dedicatedAccountManaged": False,
+            "dedicatedAccountConflict": False,
+        }
+        with patch.object(ccrelay_ssh, "probe_connection", return_value={
+                "success": True,
+                "status": "READY",
+                "username": "bootstrap",
+                "credentialScope": "DEFAULT",
+        }), patch.object(ccrelay_identity, "probe_environment", return_value=capability):
+            result = ccrelay_identity.plan(
+                "default", "192.0.2.10:22", ["192.0.2.10:22"], True, "ccrelay", 10)
+
+        self.assertEqual("READY_TO_APPLY", result["status"])
+        self.assertEqual("UNVERIFIED", result["nodes"][0]["accountStatus"])
+        self.assertFalse(result["nodes"][0]["privilegeSummary"]["dedicatedAccountConflict"])
+
+    def test_identity_plan_surfaces_ssh_argument_choice_for_old_openssh(self):
+        with patch.object(ccrelay_ssh, "probe_connection", return_value={
+                "success": False,
+                "failureType": "SSH_ARGUMENTS_INCOMPATIBLE",
+                "summary": "Bad configuration option: accept-new",
+        }):
+            result = ccrelay_identity.plan(
+                "default", "192.0.2.10:22", ["192.0.2.10:22"], True, "ccrelay", 10)
+
+        self.assertEqual("NEED_USER_INPUT", result["status"])
+        self.assertEqual("USE_USER_PROVIDED_SSH_ARGUMENTS", result["interaction"]["options"][0]["id"])
+        field_names = [field["name"] for field in result["interaction"]["fields"]]
+        self.assertEqual(["sshArgumentsMode", "sshArguments"], field_names)
+
     @patch.object(ccrelay_cli, "request_json", side_effect=ccrelay_cli.urllib.error.URLError("connection refused"))
     def test_identity_persistence_is_deferred_until_center_starts(self, _request):
         args = argparse.Namespace(center="http://127.0.0.1:18191", cluster_id="default", operator_id="tester")
@@ -1162,7 +1559,8 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertEqual("DEDICATED_PENDING", config["clusterIdentity"]["accountMode"])
         self.assertTrue(config["clusterIdentity"]["dedicatedAccountCreationAllowed"])
         self.assertEqual("ccrelay", config["clusterIdentity"]["dedicatedAccount"]["username"])
-        save_config.assert_called_once_with(config)
+        self.assertEqual(2, save_config.call_count)
+        save_config.assert_called_with(config)
         validate_identity_credentials.assert_called_once()
 
     @patch.object(ccrelay_ssh, "run_authenticated_command", return_value={"success": True})
@@ -1210,6 +1608,49 @@ class CcRelayCliTest(unittest.TestCase):
 
         self.assertIn("/usr/bin/sudo -n -u ccrelay /bin/sh -c", command)
         self.assertIn("/usr/bin/ssh", command)
+
+    def test_identity_verify_uses_custom_ssh_arguments_for_remote_hops(self):
+        command = ccrelay_identity.center_verify_command(
+            {"host": "192.0.2.11", "port": 22},
+            "ccrelay",
+            True,
+            {"uid": "0", "runuserPath": "/usr/sbin/runuser", "shPath": "/bin/sh", "sshPath": "/usr/bin/ssh"},
+            "bootstrap",
+            ["-o", "StrictHostKeyChecking=no", "-o", "KexAlgorithms=+diffie-hellman-group14-sha1"],
+        )
+
+        self.assertIn("StrictHostKeyChecking=no", command)
+        self.assertIn("KexAlgorithms=+diffie-hellman-group14-sha1", command)
+        self.assertNotIn("StrictHostKeyChecking=accept-new", command)
+
+    @patch.object(ccrelay_identity, "ensure_cluster_key", return_value=Path("cluster-key"))
+    @patch.object(ccrelay_ssh, "ssh_arguments_for", return_value=["-o", "StrictHostKeyChecking=no"])
+    @patch.object(ccrelay_ssh, "run_key_command", return_value={"success": True, "latencyMs": 2})
+    @patch.object(ccrelay_ssh, "run_authenticated_command", return_value={"success": False, "summary": "sudo denied"})
+    def test_identity_verify_falls_back_to_direct_dedicated_login(
+            self, run_authenticated, run_key, _ssh_arguments, _cluster_key):
+        nodes = [
+            {
+                "host": "192.0.2.10", "port": 22, "nodeKey": "192.0.2.10:22",
+                "bootstrapUsername": "bootstrap", "runtimeUsername": "ccrelay",
+                "privilegeSummary": {"uid": "1000", "sshPath": "/usr/bin/ssh", "shPath": "/bin/sh"},
+            },
+            {
+                "host": "192.0.2.11", "port": 22, "nodeKey": "192.0.2.11:22",
+                "bootstrapUsername": "bootstrap", "runtimeUsername": "ccrelay",
+                "privilegeSummary": {"uid": "1000", "sshPath": "/usr/bin/ssh", "shPath": "/bin/sh"},
+            },
+        ]
+
+        result = ccrelay_identity.verify(
+            "default", "192.0.2.10:22", nodes, True, "ccrelay", 10,
+            "SHA256:test", "SHARED_KEYPAIR")
+
+        self.assertEqual("FULL_MESH", result["effectiveCapability"])
+        self.assertEqual("READY", result["centerToNodeStatus"])
+        self.assertEqual("READY", result["nodeToNodeStatus"])
+        self.assertGreaterEqual(run_authenticated.call_count, 3)
+        self.assertGreaterEqual(run_key.call_count, 3)
 
     @patch.object(ccrelay_ssh, "run_authenticated_command", return_value={"success": True, "summary": ""})
     def test_identity_verify_does_not_ssh_from_center_to_itself(self, run_command):
@@ -2128,6 +2569,98 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertEqual("session-agent", task_record["body"]["sessionId"])
         self.assertTrue(output["accepted"])
 
+    def test_deploy_batch_expands_targets_opens_one_session_and_respects_concurrency(self):
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+        submitted = []
+        opened_sessions = []
+
+        def request(_args, method, path, body=None, **_kwargs):
+            nonlocal active, maximum
+            if path == "/api/skill/session/open":
+                opened_sessions.append(body)
+                return {"sessionId": "session-batch"}
+            if path == "/api/skill/tasks/create":
+                with lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                    submitted.append(body)
+                time.sleep(0.03)
+                with lock:
+                    active -= 1
+                return {"taskId": body["taskId"], "status": "ACCEPTED"}
+            return {}
+
+        args = argparse.Namespace(
+            target_node_ids=["node-a:18091,node-b:18091", "node-b:18091,node-c:18091"],
+            session_id=None, request_id=None, parent_task_id=None, task_type="DEPLOY_RELAY",
+            source_node_id="node-source:18091", payload_json='{"deployMode":"SELF_REPLICATE"}',
+            payload_file=None, timeout_ms=600000, concurrency=2, json=None, json_file=None,
+            center=self.center, center_configured_by="TEST", timeout=5.0,
+        )
+        with patch.object(ccrelay_cli, "request_json", side_effect=request), \
+                patch.object(ccrelay_cli, "enrich_deploy_payload"), \
+                patch.object(ccrelay_cli, "apply_center_endpoints"):
+            result = ccrelay_cli.task_create_batch(args)
+
+        self.assertEqual("session-batch", result["sessionId"])
+        self.assertEqual(3, result["targetCount"])
+        self.assertEqual(3, result["createdCount"])
+        self.assertEqual(2, maximum)
+        self.assertEqual(["node-a:18091", "node-b:18091", "node-c:18091"],
+                         [item["targetNodeId"] for item in result["results"]])
+        self.assertEqual(1, len(opened_sessions))
+        self.assertEqual(3, len({item["taskId"] for item in submitted}))
+
+    def test_deploy_batch_isolates_child_submission_failure(self):
+        submitted = []
+
+        def request(_args, method, path, body=None, **_kwargs):
+            if path == "/api/skill/session/open":
+                return {"sessionId": "session-batch"}
+            if path == "/api/skill/tasks/create":
+                submitted.append(body["targetNodeId"])
+                if body["targetNodeId"] == "node-b:18091":
+                    raise CliError("simulated child failure")
+                return {"taskId": body["taskId"], "status": "ACCEPTED"}
+            return {}
+
+        args = argparse.Namespace(
+            target_node_ids=["node-a:18091,node-b:18091,node-c:18091"], session_id=None,
+            request_id=None, parent_task_id=None, task_type="DEPLOY_RELAY",
+            source_node_id=None, payload_json='{"deployMode":"SELF_REPLICATE"}', payload_file=None,
+            timeout_ms=None, concurrency=2, json=None, json_file=None, center=self.center,
+            center_configured_by="TEST", timeout=5.0,
+        )
+        with patch.object(ccrelay_cli, "request_json", side_effect=request), \
+                patch.object(ccrelay_cli, "enrich_deploy_payload"), \
+                patch.object(ccrelay_cli, "apply_center_endpoints"):
+            result = ccrelay_cli.task_create_batch(args)
+
+        self.assertEqual(2, result["createdCount"])
+        statuses = {item["targetNodeId"]: item["status"] for item in result["results"]}
+        self.assertEqual("CREATED", statuses["node-a:18091"])
+        self.assertEqual("CREATE_FAILED", statuses["node-b:18091"])
+        self.assertEqual("CREATED", statuses["node-c:18091"])
+        self.assertEqual(3, len(submitted))
+
+    def test_deploy_batch_rejects_invalid_concurrency(self):
+        with self.assertRaises(Exception):
+            ccrelay_cli.parse_ssh_concurrency("0")
+        with self.assertRaises(Exception):
+            ccrelay_cli.parse_ssh_concurrency("33")
+
+    def test_deploy_batch_parser_accepts_comma_separated_targets(self):
+        with patch.dict(os.environ, {"CCRELAY_SKILL_ROOT": self.temporary_directory.name}):
+            args = ccrelay_cli.build_parser().parse_args([
+                "task", "create-batch", "--target-node-ids", "node-a:18091,node-b:18091",
+                "--concurrency", "2",
+            ])
+        self.assertEqual(["node-a:18091,node-b:18091"], args.target_node_ids)
+        self.assertEqual(2, args.concurrency)
+        self.assertEqual("DEPLOY_RELAY", args.task_type)
+
     def test_deploy_payload_infers_runtime_identity_from_target_node(self):
         args = argparse.Namespace(target_node_id="192.0.2.10:18091")
         payload = {"deployMode": "SELF_REPLICATE"}
@@ -2152,7 +2685,7 @@ class CcRelayCliTest(unittest.TestCase):
 
         self.assertEqual(
             {"deployMode": "SELF_REPLICATE", "host": "192.0.2.10", "relayPort": 18091,
-             "port": 22, "username": "center-ccrelay"},
+             "replaceExistingRelay": True, "port": 22, "username": "center-ccrelay"},
             payload,
         )
 

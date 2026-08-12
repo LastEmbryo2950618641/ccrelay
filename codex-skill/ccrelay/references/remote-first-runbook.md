@@ -22,7 +22,7 @@
 
 ## 远端优先决策顺序
 
-1. 对带目标 IP/SSH 端口的新任务，先执行 `<CLI> bootstrap next --node <ip:port>...`。无数据库记录表示 `UNINITIALIZED`，必须先完成 SSH 引导；`SSH_READY` 表示免密已完成；`DEPLOYED` 表示完整部署已验收。阶段库不保存凭据、节点详情或中间选项。
+1. 对带目标 IP/SSH 端口的新任务，先执行 `<CLI> bootstrap next --node <ip:port>... [--concurrency 4]`。多个节点既可重复传入 `--node`，也可使用 `--nodes <node-a>,<node-b>` 逗号分隔。SSH 多节点操作默认最大并发为 `4`，允许 `1-32`；节点内部步骤保持顺序，输出按输入顺序展示。无数据库记录表示 `UNINITIALIZED`，必须先完成 SSH 引导；`SSH_READY` 表示免密已完成；`DEPLOYED` 表示完整部署已验收。阶段库不保存凭据、节点详情或中间选项。
 2. 仅当阶段允许继续时执行 `<CLI> center resolve`，确认当前使用的 CC 中心；未配置远端中心时默认使用 `127.0.0.1:18191`，若本地中心未运行则由 CLI 自动启动 Skill 内非 AI center；远端中心 bootstrap 使用同一 runtime bundle 另外启动 Relay sidecar。
 3. 执行 `<CLI> health` 检查运行时。
 4. 执行 `<CLI> relay scan` 或 `<CLI> relay node <nodeId>` 检查节点可用性。
@@ -37,11 +37,13 @@
 8. 如果响应决策为 `ALLOW_WITH_DEPLOY`，创建本地 `DEPLOY_RELAY` 任务，并设置：
    - `deployMode=SELF_REPLICATE`
    - `enableCenterFallback=true`
+   - `replaceExistingRelay=true`（默认；自动停止目标 Relay 并覆盖产品工作目录，不单独询问）
 
 部署恢复已经位于真实协作会话中时复用该 `sessionId`。首次独立部署没有真实会话时不得构造固定会话 ID，也不得使用示例字符串；省略 `--session-id`，由 `task create` 自动调用 `session open`，并将 Center 返回的真实 `sessionId` 写入部署任务。
    - SSH 主机、端口、用户名、脚本路径、制品路径
    - 制品应为本地制品包目录，并且已包含 `app.jar` 与 `runtime/`
    - 未指定远端目录时，默认使用 `/home/${runtimeUser}/${productName}/${host}-${relayPort}`；实际目录在端口确定后渲染
+   - 中小集群需要同时部署多个目标时，使用 `<CLI> task create-batch --target-node-ids <nodeA:relayPort,nodeB:relayPort> --concurrency 2 --payload-json '{"deployMode":"SELF_REPLICATE","enableCenterFallback":true}'`。该命令共享一次部署会话，独立提交多个现有单目标任务；每个目标独立返回 `taskId`，单目标失败不阻断其他目标。默认并发 `4`，范围 `1-32`，结果按输入顺序输出。
 9. 部署后必须同时满足以下条件，才能使用节点：
    - 目标 relay心跳健康
    - 目标 relay 已回注册到中心
@@ -185,7 +187,8 @@ SSH 端口: 22
 ```powershell
 <CLI> ssh identity plan `
   --node <hostA>:<sshPort> `
-  --node <hostB>:<sshPort>
+  --node <hostB>:<sshPort> `
+  --concurrency 4
 ```
 
 该早期计划只验证节点凭据并收集账号模式、专用账号详情和执行模式，不要求 `--center-node`。用户确认执行模式后，先通过 `center plan|bootstrap` 探测资源并选择中心，再在 `ssh identity apply` 中传入选中的 `--center-node`。
@@ -213,6 +216,10 @@ SSH 端口: 22
 
 AI 决策规则：`FULL_MESH` 才能考虑节点间 SSH 自复制；`CENTER_ONLY` 只能使用 relay/A2A 协同或中心 SSH 兜底；`DEGRADED` 和 `UNKNOWN` 必须先刷新预检。
 
+首次 `bootstrap next` 会把用户确认的完整部署范围写入本地 `targetNodes`。后续身份和中心规划命令都以 active `targetNodes` 为准，当前命令只传部分节点不能缩小范围。认证失败节点优先配置独立凭据；网络不可达节点可重试或保留为失败，只有用户明确确认后才使用 `ssh identity targets exclude --node <host:port> --confirm true` 排除。
+
+验收 `FULL_MESH` 时必须核对目标节点数和有向信任边数：N 个节点需要 `N * (N - 1)` 条 READY 边。多节点目标集合出现 `trustEdges=[]` 必须判定为未完成，不能解释为无需节点间互信。
+
 #### 交互要求
 
 - 每个选择都必须是明确选项，不得只用一句话让用户“提供账号密码”。
@@ -227,6 +234,7 @@ AI 决策规则：`FULL_MESH` 才能考虑节点间 SSH 自复制；`CENTER_ONLY
 1. 查看配置：`<CLI> ssh config show`。
 2. 缺少通用配置时，向用户展示选项；用户选择后运行 `<CLI> ssh config set-default --username <user> --port 22`，密码使用安全提示输入。
 3. 通用配置对某节点失败时，向用户展示节点级选项；用户选择后运行 `<CLI> ssh config set-node --host <ip> --port <port> --username <user>`。
+   - 默认 SSH 参数使用兼容 OpenSSH 7.4 的 `StrictHostKeyChecking=no`；如果用户已有更严格策略或希望完全接管参数，先让用户选择 `USER_PROVIDED`，再以重复的 `--ssh-argument` 保存其参数。
 4. 执行 `<CLI> ssh identity plan`；若返回 `SSH_CREDENTIALS_INVALID`，先按结构化字段补齐失败节点凭据并重试，直到全部节点通过。
 5. 凭据全部通过后，让用户选择是否创建 Skill 专用账号；若选择专用模式，再展示账号和目录预览。
 6. 用户选择后先执行 `<CLI> ssh identity select --allow-create <true|false>` 保存本地策略；详情确认和中心选择完成后执行 `<CLI> ssh identity apply [--confirm-details true]`，完成账号/密钥配置和 SQLite 状态上报；需要审计归属时附加 `--operator-id <operator>`。
@@ -251,7 +259,7 @@ AI 决策规则：`FULL_MESH` 才能考虑节点间 SSH 自复制；`CENTER_ONLY
 1. 当通用凭据可登录但尚未免密时，先用该账号在远端完成授权配置。
 2. 中心部署必须使用当前 CC center 自己的公钥；调用端本地密钥只用于调用端测试，不能替代远端中心密钥。
 3. 将中心公钥写入目标节点 `authorized_keys`；多节点互通场景再按授权策略同步集群公钥。
-4. 若账号没有写权限或没有 sudo，直接提示需要更高权限账号，不要伪装成功。
+4. 若账号没有写权限或没有 sudo，直接提示需要更高权限账号，不要伪装成功；但如果专用账号已经创建且引导账号仅无法读取其目录，必须标记为 `INACCESSIBLE`，优先用集群私钥直接登录专用账号验收，不得判为创建失败。
 
 ### 平台与失败边界
 

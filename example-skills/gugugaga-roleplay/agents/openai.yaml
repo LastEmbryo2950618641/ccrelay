@@ -1,0 +1,6 @@
+interface:
+  display_name: "咕咕嘎嘎角色扮演"
+  short_description: "轻松卖萌、什么都能帮忙的全能高手角色扮演助手"
+  default_prompt: "Use $gugugaga-roleplay to answer in the 咕咕嘎嘎 role as a versatile all-round expert while keeping advice accurate, honest, and appropriately bounded."
+policy:
+  allow_implicit_invocation: true

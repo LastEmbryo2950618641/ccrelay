@@ -58,12 +58,16 @@ $env:CCRELAY_CENTER_URL = "<center-url>"
 - `--json`：直接传完整 JSON 请求体。
 - `--json-file`：从文件读取完整 JSON 请求体。
 
+SSH 集群命令 `bootstrap next`、`ssh identity plan|select|apply|verify|rotate-key` 和 `center plan|bootstrap` 还支持 `--concurrency <n>`。默认 `4`，范围 `1-32`，表示本次 SSH 多节点操作允许同时执行的最大任务数；实际并发不会超过任务数。
+
+节点连接与环境探测、账号或公钥安装、Center 到节点验证按节点并发；专用账号 FULL_MESH 验证按 `(source,target)` 信任边并发。单个节点内部步骤仍保持顺序，输出始终按输入节点或信任边顺序排列；单节点失败会记录为该节点失败，不会取消其他节点。
+
 ## 命令清单
 
 ### 引导阶段
 
 - `bootstrap status [--cluster-id <id>]`：读取三阶段里程碑；无记录返回 `UNINITIALIZED`。
-- `bootstrap next --node <host:sshPort>...`：新任务的唯一引导入口；未初始化时返回 SSH 凭据交互，已部署时允许进入正常 Relay 协作。
+- `bootstrap next --node <host:sshPort>... [--concurrency 4]`：新任务的唯一引导入口；未初始化时返回 SSH 凭据交互，已部署时允许进入正常 Relay 协作。节点既可重复传入 `--node`，也可使用 `--nodes <node-a>,<node-b>` 逗号分隔，两种形式可以混用。
 - `bootstrap mark-deployed [--cluster-id <id>]`：仅允许从 `SSH_READY` 进入 `DEPLOYED`，重复执行幂等。
 - `bootstrap reset [--cluster-id <id>]`：删除阶段记录并回到 `UNINITIALIZED`。
 
@@ -86,13 +90,29 @@ HMAC secret 属于跨进程配置。`config secret set wdsavs.ai.relay.hmac-secr
 
 ```powershell
 <CLI> center resolve
-<CLI> center plan --node <node-a:sshPort> --node <node-b:sshPort>
-<CLI> center bootstrap --node <node-a:sshPort> --node <node-b:sshPort>
+<CLI> center plan --nodes <node-a:sshPort>,<node-b:sshPort> --concurrency 4
+<CLI> center bootstrap --nodes <node-a:sshPort>,<node-b:sshPort> --concurrency 4
 ```
 
 ### 健康检查
 
 - `health`：检查中心运行时健康状态。
+
+### Skill 管理
+
+- `skill install <directory-or-zip>`：校验并打包标准 Skill，计算文件树 SHA-256，然后上传到当前 CC Center。
+- `skill list`：读取 Center 的完整 Skill 目录、目录摘要、状态和制品摘要。
+- `skill remove <skillId>`：将 Center 中的 Skill 置为 `INVALID`；各 Relay 在后续心跳后异步移除本地副本。
+
+```powershell
+<CLI> skill install C:\path\to\my-skill
+<CLI> skill list
+<CLI> skill remove my-skill
+```
+
+安装输入可以是包含根级 `SKILL.md` 的目录，也可以是同结构 ZIP。CLI 不逐台连接 Relay；Center 是集群 Skill 目录的唯一权威来源，普通 Relay 与 Center Relay 都在心跳成功后异步比较 SHA-256 并同步。只有本地状态为 `INSTALLED` 且文件树校验通过的 Skill 对 Claude 可见。
+
+`skill remove` 是逻辑失效操作，不直接删除 Center 元数据。Relay 上的传输或校验失败保持 `INSTALLING` 并记录错误，后续心跳继续重试；只有 Center 已失效或完整目录中不存在的 Skill 才进入 `INVALID`。
 
 ### 会话
 
@@ -165,6 +185,7 @@ HMAC secret 属于跨进程配置。`config secret set wdsavs.ai.relay.hmac-secr
 - 顶层 `observe` 与 `task observe` 同义，适合先看窗口再决定是否深入。
 - `task create`：创建本地异步任务。
 - `task create` 必须提供 `--session-id`，或通过 `--json/--json-file` 提供 `sessionId`；CLI 会在发起 HTTP 请求前拒绝缺失会话的请求。
+- `task create-batch`：面向中小集群批量创建 `DEPLOY_RELAY` 子任务。它只打开一次部署会话，按 `--concurrency` 有界并发提交每个目标，单个目标失败不取消其他目标，返回结果按输入目标顺序排列；命令只提交任务，不等待部署终态。
 - `task get <taskId>`：查询本地异步任务。
 - `task status <taskId>`：查询任务状态。
 - `task cancel <taskId>`：取消任务。
@@ -182,6 +203,18 @@ HMAC secret 属于跨进程配置。`config secret set wdsavs.ai.relay.hmac-secr
   --payload-json '{"deployMode":"SELF_REPLICATE","enableCenterFallback":true}' `
   --timeout-ms 600000
 ```
+
+批量部署示例：
+
+```powershell
+<CLI> task create-batch `
+  --target-node-ids node-a:18091,node-b:18091,node-c:18091 `
+  --concurrency 2 `
+  --payload-json '{"deployMode":"SELF_REPLICATE","enableCenterFallback":true}' `
+  --timeout-ms 600000
+```
+
+`--target-node-ids` 支持逗号分隔，也可以重复传入；重复目标会去重。`--concurrency` 范围为 `1-32`，默认 `4`，只限制本次批量提交和中心 SSH 预检的并发数。每个目标仍由现有单目标部署执行器独立处理，任务 ID 可使用 `task get <taskId>`、`task events <taskId>` 或 `task observe --task-ids <taskId,...>` 继续查看。当前未实现动态源池、滚动波次、自动换源、取消聚合和重启恢复。
 
 ### A2A
 
@@ -287,6 +320,7 @@ scripts\prepare-cc-config.ps1 --prompt-api-key --test --write <skill>\.local\cc-
 - `ssh config show`：查看脱敏后的通用与节点级 SSH 配置。
 - `ssh config set-default`：配置唯一通用 SSH 凭据。
 - `ssh config set-passwordless-default --username <user> --port <port> [--private-key-file <path>]`：保存已有免密通用账号；私钥路径为空时使用系统 SSH config、SSH Agent 或默认密钥，不要求或保存密码。
+- SSH 参数来源通过 `--ssh-arguments-mode DEFAULT|USER_PROVIDED` 选择。默认模式使用兼容 OpenSSH 7.4 的 `StrictHostKeyChecking=no`；`USER_PROVIDED` 时重复传入 `--ssh-argument` 作为原始 argv token，Skill 不再追加自己的连接、HostKey、BatchMode 或认证参数，只生成端口、目标地址和必要的密钥参数。该配置按通用凭据或 `ip:port` 节点覆盖保存，并用于本地 SSH、SCP 以及对应节点发起的远端互信检查。
 - `ssh config set-node --host <ip> --port <port>`：配置 `ip:port` 节点级覆盖。
 - `ssh tools`：检查本机 `ssh`、`scp`、`ssh-keygen`。
 - `ssh identity plan`：只读探测引导账号、远端系统和账号创建权限。
@@ -295,6 +329,15 @@ scripts\prepare-cc-config.ps1 --prompt-api-key --test --write <skill>\.local\cc-
 - `ssh identity status`：查看本地和中心保存的账号策略与脱敏能力摘要。
 - `ssh identity verify`：刷新中心到节点和节点间互信状态。
 - `ssh identity rotate-key`：轮换专用模式的共享集群密钥。
+- `ssh identity targets status`：查看用户确认的部署目标、已完成、当前失败和已排除节点。
+- `ssh identity targets add --node <host:port>`：显式扩充部署目标集合。
+- `ssh identity targets exclude --node <host:port> --confirm true`：经用户确认后排除目标节点；不带确认参数不会修改集合。
+
+首次 `bootstrap next --node ...` 会在任何 SSH 远端操作前持久化完整目标集合。后续身份命令即使省略 `--node`，或者只重复传入其中一部分，也会使用完整 active 目标集合，不会静默缩小部署范围。认证失败和网络不可达只更新 `failedNodes`，不会自动删除目标节点。
+
+`FULL_MESH` 按完整 active 目标集合计算。N 个专用账号节点必须全部成功，并具备 `N * (N - 1)` 条已验证有向互信边；因此两节点需要 2 条、三节点需要 6 条，只有真实单节点允许空互信边集合。
+
+专用账号探测结果中的 `dedicatedInspection=INACCESSIBLE` 表示引导账号无法读取该账号目录，不等于账号冲突或创建失败。只有 `dedicatedInspection=UNMANAGED` 且检查权限明确可用时才报告同名账号冲突；如果集群私钥可以直接登录专用账号，`identity apply|verify` 会直接以专用账号完成验收，避免依赖引导账号的 `sudo -u` 权限。
 
 身份写入命令支持 `--operator-id`，默认取当前系统用户；每次成功的状态快照会写入独立的 `wdsavs_ai_ssh_identity_audit_event` 表。审计只保存操作、账号模式、能力摘要、节点/互信边数量和公钥指纹，不保存密码、私钥或完整秘密参数。
 - `ssh prepare-center`：获取当前中心公钥，用本地凭据写入目标节点，再由中心验证免密。
@@ -360,9 +403,9 @@ GUI 只负责拉起终端，不负责接收或回显密码；Windows 使用 `ccr
 ```powershell
 <CLI> ssh config set-default --username liuqi --port 22
 <CLI> ssh config set-passwordless-default --username ops --port 22 --private-key-file ~/.ssh/id_ed25519
-<CLI> ssh identity plan --center-node 47.93.195.246:22 --node 47.93.195.246:22 --node 111.229.32.85:22
+<CLI> ssh identity plan --nodes 47.93.195.246:22,111.229.32.85:22 --concurrency 4
 <CLI> ssh identity select --allow-create false --node <node-a>:22 --node <node-b>:22
-<CLI> ssh identity apply --execution-mode AUTO_EXECUTE_REMAINING --center-node <selected-center>:22 --node <node-a>:22 --node <node-b>:22
+<CLI> ssh identity apply --execution-mode AUTO_EXECUTE_REMAINING --center-node <selected-center>:22 --nodes <node-a>:22,<node-b>:22 --concurrency 4
 # 专用模式还必须在用户看到目录预览后确认：
 <CLI> ssh identity select --allow-create true --confirm-details true --dedicated-username ccrelay --node <node-a>:22 --node <node-b>:22
 <CLI> ssh identity apply --confirm-details true --execution-mode AUTO_EXECUTE_REMAINING --center-node <selected-center>:22 --node <node-a>:22 --node <node-b>:22

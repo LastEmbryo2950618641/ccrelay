@@ -27,15 +27,20 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.io.ByteArrayOutputStream;
 import java.math.BigDecimal;
 import java.net.ServerSocket;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -44,6 +49,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -82,6 +89,7 @@ class AiAgentSkillRuntimeStandaloneIntegrationTest {
         registry.add("spring.datasource.driver-class-name", () -> "org.sqlite.JDBC");
         registry.add("spring.jpa.database-platform", () -> "org.hibernate.community.dialect.SQLiteDialect");
         registry.add("spring.jpa.hibernate.ddl-auto", () -> "update");
+        registry.add("wdsavs.ai.skill.directory", () -> runtimeDir.resolve("center-skills").toString());
         registry.add("wdsavs.ai.task.recover-on-startup", () -> "false");
         registry.add("wdsavs.ai.relay.node-whitelist-enabled", () -> "true");
     }
@@ -591,6 +599,66 @@ class AiAgentSkillRuntimeStandaloneIntegrationTest {
     }
 
     @Test
+    void synchronizesInstalledUpdatedAndInvalidatedSkillsThroughRelayHeartbeats() throws Exception {
+        int relayPort = freePort();
+        Path relayRoot = runtimeDir.resolve("skill-sync-" + relayPort);
+        RemoteCcRelayProperties properties = new RemoteCcRelayProperties();
+        properties.setHost("127.0.0.1");
+        properties.setNodeHost("127.0.0.1");
+        properties.setPort(relayPort);
+        properties.setPath("/api/ai/remote-cc/chat");
+        properties.setRelayEndpoint("http://127.0.0.1:" + relayPort + properties.getPath());
+        properties.setCenterRegisterEndpoint(baseUrl("/api/skill/relay/register"));
+        properties.setCenterHeartbeatEndpoint(baseUrl("/api/skill/relay/heartbeat"));
+        properties.setHeartbeatIntervalMs(100L);
+        properties.setWorkingDirectory(relayRoot.toString());
+        properties.setNodeIdFilePath(relayRoot.resolve("node-id").toString());
+        properties.setContextStateFilePath(relayRoot.resolve("context.json").toString());
+        properties.setSkillDirectory(relayRoot.resolve("skills").toString());
+        properties.setSkillMetadataDbPath(relayRoot.resolve("relay-skills.db").toString());
+        RemoteCcRelayServer relayServer = new RemoteCcRelayServer(
+                properties,
+                new RemoteCcRelayService(properties, request -> new AiChatResponse("unused", "SUCCESS", "skill-sync")));
+        relayServer.start();
+        relayServers.add(relayServer);
+
+        Path roleSkillSource = Path.of("example-skills", "gugugaga-roleplay").toAbsolutePath().normalize();
+        installSkill(skillArchive(roleSkillSource));
+        Path installedRole = relayRoot.resolve("skills/gugugaga-roleplay");
+        for (String relativePath : List.of(
+                "SKILL.md",
+                "agents/openai.yaml",
+                "roles/咕咕嘎嘎/性格.md",
+                "roles/咕咕嘎嘎/对话例子.md",
+                "roles/咕咕嘎嘎/背景设定.md",
+                "roles/咕咕嘎嘎/知识.md")) {
+            awaitFileContent(
+                    installedRole.resolve(relativePath),
+                    Files.readString(roleSkillSource.resolve(relativePath), StandardCharsets.UTF_8),
+                    10_000L);
+        }
+
+        ResponseEntity<Map> invalidatedRole = restTemplate.exchange(
+                baseUrl("/api/skill/catalog/gugugaga-roleplay"), HttpMethod.DELETE, HttpEntity.EMPTY, Map.class);
+        assertEquals(HttpStatus.OK, invalidatedRole.getStatusCode());
+        assertEquals("INVALID", invalidatedRole.getBody().get("status"));
+        awaitMissing(installedRole, 10_000L);
+
+        installSkill(skillArchive("version-one"));
+        Path installedKnowledge = relayRoot.resolve("skills/sample-skill/references/knowledge.md");
+        awaitFileContent(installedKnowledge, "version-one", 10_000L);
+
+        installSkill(skillArchive("version-two"));
+        awaitFileContent(installedKnowledge, "version-two", 10_000L);
+
+        ResponseEntity<Map> invalidated = restTemplate.exchange(
+                baseUrl("/api/skill/catalog/sample-skill"), HttpMethod.DELETE, HttpEntity.EMPTY, Map.class);
+        assertEquals(HttpStatus.OK, invalidated.getStatusCode());
+        assertEquals("INVALID", invalidated.getBody().get("status"));
+        awaitMissing(installedKnowledge.getParent().getParent(), 10_000L);
+    }
+
+    @Test
     void persistsSessionContextAndReadsOnlyTheRequestedDelta() {
         String sessionId = openSession("context-test:" + port);
         AiSessionContextAppendRequest userEvent = new AiSessionContextAppendRequest();
@@ -656,6 +724,69 @@ class AiAgentSkillRuntimeStandaloneIntegrationTest {
         Optional<AiTaskEntity> task = taskRepository.findByTaskId(taskId);
         assertTrue(task.isPresent());
         assertEquals(expectedStatus, task.get().getStatus());
+    }
+
+    private void installSkill(byte[] artifact) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.parseMediaType("application/zip"));
+        ResponseEntity<Map> installed = restTemplate.postForEntity(
+                baseUrl("/api/skill/catalog/install"), new HttpEntity<>(artifact, headers), Map.class);
+        assertEquals(HttpStatus.OK, installed.getStatusCode());
+        assertEquals("ACTIVE", installed.getBody().get("status"));
+    }
+
+    private byte[] skillArchive(String knowledge) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ZipOutputStream output = new ZipOutputStream(bytes, StandardCharsets.UTF_8)) {
+            output.putNextEntry(new ZipEntry("SKILL.md"));
+            output.write("---\nname: sample-skill\ndescription: sample\n---\n\n# Sample\n"
+                    .getBytes(StandardCharsets.UTF_8));
+            output.closeEntry();
+            output.putNextEntry(new ZipEntry("references/knowledge.md"));
+            output.write(knowledge.getBytes(StandardCharsets.UTF_8));
+            output.closeEntry();
+        }
+        return bytes.toByteArray();
+    }
+
+    private byte[] skillArchive(Path skillRoot) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ZipOutputStream output = new ZipOutputStream(bytes, StandardCharsets.UTF_8);
+             var files = Files.walk(skillRoot)) {
+            for (Path file : files.filter(Files::isRegularFile)
+                    .sorted(java.util.Comparator.comparing(path -> skillRoot.relativize(path).toString()))
+                    .toList()) {
+                String relativePath = skillRoot.relativize(file).toString().replace('\\', '/');
+                output.putNextEntry(new ZipEntry(relativePath));
+                output.write(Files.readAllBytes(file));
+                output.closeEntry();
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    private void awaitFileContent(Path file, String expected, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (Files.isRegularFile(file)
+                    && expected.equals(Files.readString(file, StandardCharsets.UTF_8))) {
+                return;
+            }
+            Thread.sleep(100L);
+        }
+        assertTrue(Files.isRegularFile(file));
+        assertEquals(expected, Files.readString(file, StandardCharsets.UTF_8));
+    }
+
+    private void awaitMissing(Path path, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (!Files.exists(path)) {
+                return;
+            }
+            Thread.sleep(100L);
+        }
+        assertFalse(Files.exists(path));
     }
 
     private String startRelayServer(int relayPort, String answer, String traceId, long delayMs,

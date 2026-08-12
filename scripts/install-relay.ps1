@@ -19,6 +19,7 @@ $logFile = if ($env:WDSAVS_CC_RELAY_LOG_FILE) { $env:WDSAVS_CC_RELAY_LOG_FILE } 
 $errorFile = [IO.Path]::ChangeExtension($logFile, '.error.log')
 $hmacSecretFile = if ($env:WDSAVS_AI_RELAY_HMAC_SECRET_FILE) { $env:WDSAVS_AI_RELAY_HMAC_SECRET_FILE } else { Join-Path $bundle 'config/relay-hmac-secret' }
 $systemPromptFile = if ($env:WDSAVS_AI_RELAY_SYSTEM_PROMPT_FILE) { $env:WDSAVS_AI_RELAY_SYSTEM_PROMPT_FILE } else { Join-Path $bundle 'config/relay-system-prompt.txt' }
+$skillDirectory = if ($env:CCRELAY_SKILL_DIR) { $env:CCRELAY_SKILL_DIR } else { Join-Path $bundle 'skills' }
 $startupTimeout = if ($env:WDSAVS_CC_RELAY_STARTUP_TIMEOUT_SECONDS) { [int]$env:WDSAVS_CC_RELAY_STARTUP_TIMEOUT_SECONDS } else { 10 }
 $preserveArchives = $env:WDSAVS_CC_RELAY_PRESERVE_ARCHIVES -eq 'true'
 $relayPort = if ($env:WDSAVS_CC_RELAY_PORT) { [int]$env:WDSAVS_CC_RELAY_PORT } else { 18091 }
@@ -28,6 +29,8 @@ foreach ($argument in @($RelayArguments)) {
     }
 }
 $env:WDSAVS_CC_RELAY_PORT = [string]$relayPort
+$env:CCRELAY_SKILL_DIR = $skillDirectory
+New-Item -ItemType Directory -Path $skillDirectory -Force | Out-Null
 if (Test-Path -LiteralPath $systemPromptFile -PathType Leaf) { $env:WDSAVS_AI_RELAY_SYSTEM_PROMPT_FILE = $systemPromptFile }
 
 if (-not (Test-Path -LiteralPath $appJar -PathType Leaf)) {
