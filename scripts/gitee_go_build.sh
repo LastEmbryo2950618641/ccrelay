@@ -94,6 +94,21 @@ ensure_gradle_command() {
   fail 'Gradle Wrapper or Gradle is required on the Gitee Go runner'
 }
 
+run_gradle() {
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if "$GRADLE_CMD" "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -eq 3 ]; then
+      fail "Gradle command failed after $attempt attempts: $*"
+    fi
+    log "Gradle command failed (attempt $attempt/3); retrying in 10 seconds"
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+}
+
 ensure_java() {
   if have java; then
     return 0
@@ -110,14 +125,14 @@ ensure_java
 cd "$REPO_ROOT"
 
 log 'Running Java tests'
-"$GRADLE_CMD" test
+run_gradle test
 
 log 'Running CLI tests'
 "$PYTHON_BIN" scripts/test_ccrelay_cli.py
 "$PYTHON_BIN" scripts/test_release_packages.py
 
 log 'Building boot JAR'
-"$GRADLE_CMD" bootJar
+run_gradle bootJar
 
 BOOT_JAR=$(ls -1t build/libs/*.jar 2>/dev/null | head -n 1 || true)
 [ -n "$BOOT_JAR" ] || fail 'Boot JAR was not generated'

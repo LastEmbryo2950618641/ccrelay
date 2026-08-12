@@ -22,6 +22,23 @@ class ReleasePackageTest(unittest.TestCase):
             build_script.index("ensure_gradle_command\n"),
         )
 
+    def test_gradle_wrapper_uses_china_accessible_distribution_mirror(self):
+        repository = Path(__file__).resolve().parents[1]
+        wrapper_properties = (repository / "gradle/wrapper/gradle-wrapper.properties").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "distributionUrl=https\\://mirrors.cloud.tencent.com/gradle/gradle-8.5-bin.zip",
+            wrapper_properties,
+        )
+
+    def test_gitee_build_retries_gradle_after_transient_download_failure(self):
+        repository = Path(__file__).resolve().parents[1]
+        build_script = (repository / "scripts/gitee_go_build.sh").read_text(encoding="utf-8")
+
+        self.assertIn("run_gradle()", build_script)
+        self.assertIn('run_gradle test', build_script)
+        self.assertIn('run_gradle bootJar', build_script)
+
     def test_local_and_github_builds_share_the_same_packager(self):
         repository = Path(__file__).resolve().parents[1]
         powershell_build = (repository / "build.ps1").read_text(encoding="utf-8")
