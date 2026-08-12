@@ -18,7 +18,7 @@ import zipfile
 from contextlib import redirect_stdout
 from unittest.mock import call, patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.parse import parse_qs, urlparse
 
 
@@ -2022,10 +2022,11 @@ class CcRelayCliTest(unittest.TestCase):
             run.call_args.args[0][-1],
         )
 
+    @patch.object(ccrelay_ssh, "resolve_credential", return_value=(None, None))
     @patch.object(ccrelay_ssh.os, "name", "nt")
     @patch.object(ccrelay_ssh.subprocess, "run")
     @patch.object(ccrelay_ssh.shutil, "which", return_value="scp")
-    def test_scp_normalizes_windows_source_separators_for_remote_basenames(self, _which, run):
+    def test_scp_normalizes_windows_source_separators_for_remote_basenames(self, _which, run, _resolve_credential):
         run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
         result = ccrelay_ssh._run_scp(
@@ -2033,8 +2034,8 @@ class CcRelayCliTest(unittest.TestCase):
             22,
             "ccrelay",
             [
-                Path(r"C:\Users\tester\.claude\skills\ccrelay\assets\runtime-bundle\ccrelay\app.jar"),
-                Path(r"C:\Users\tester\.claude\skills\ccrelay\assets\runtime-bundle\ccrelay\runtime.tar.gz"),
+                PureWindowsPath(r"C:\Users\tester\.claude\skills\ccrelay\assets\runtime-bundle\ccrelay\app.jar"),
+                PureWindowsPath(r"C:\Users\tester\.claude\skills\ccrelay\assets\runtime-bundle\ccrelay\runtime.tar.gz"),
             ],
             "/home/ccrelay/ccrelay/192.0.2.20-18191",
             30,
