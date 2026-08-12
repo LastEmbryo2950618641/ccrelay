@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - "v*"
     tags:
       - "v*"
 
@@ -58,7 +59,9 @@ jobs:
         run: gradle test
 
       - name: Run CLI tests
-        run: python scripts/test_ccrelay_cli.py
+        run: |
+          python scripts/test_ccrelay_cli.py
+          python scripts/test_release_packages.py
 
       - name: Build application JAR
         run: gradle bootJar
@@ -86,31 +89,27 @@ jobs:
       - name: Assemble runnable Skill
         run: bash build.sh
 
-      - name: Create ZIP archive
+      - name: Collect unified release packages
         id: package
         shell: bash
         run: |
           set -euo pipefail
           version=$(sed -n "s/^version = '\([^']*\)'.*/\1/p" build.gradle | head -n 1)
           test -n "$version"
-          archive="ccrelay-${version}-${GITHUB_SHA::7}.zip"
-          mkdir -p dist/release
-          (
-            cd dist/skill
-            zip -q -r "../release/$archive" ccrelay
-          )
-          sha256sum "dist/release/$archive" > "dist/release/$archive.sha256"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-          echo "path=dist/release/$archive" >> "$GITHUB_OUTPUT"
-          echo "checksum=dist/release/$archive.sha256" >> "$GITHUB_OUTPUT"
+          test -f dist/release/ccrelay-full.zip
+          test -f dist/release/ccrelay-bootstrap.zip
+          echo "artifact=ccrelay-${version}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package.outputs.archive }}
+          name: ${{ steps.package.outputs.artifact }}
           path: |
-            ${{ steps.package.outputs.path }}
-            ${{ steps.package.outputs.checksum }}
+            dist/release/ccrelay-full.zip
+            dist/release/ccrelay-full.zip.sha256
+            dist/release/ccrelay-bootstrap.zip
+            dist/release/ccrelay-bootstrap.zip.sha256
+            dist/release/release-manifest.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
@@ -126,6 +125,10 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
           fi
           gh release upload "$GITHUB_REF_NAME" \
-            "${{ steps.package.outputs.path }}" \
-            "${{ steps.package.outputs.checksum }}" \
+            dist/release/ccrelay-full.zip \
+            dist/release/ccrelay-full.zip.sha256 \
+            dist/release/ccrelay-bootstrap.zip \
+            dist/release/ccrelay-bootstrap.zip.sha256 \
+            dist/release/release-manifest.json \
             --clobber
+          gh release edit "$GITHUB_REF_NAME" --latest

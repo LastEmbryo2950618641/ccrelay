@@ -134,4 +134,37 @@ class RemoteCcRelayServicePromptTest {
         assertEquals(120000L, captured.get(1).getTimeoutMs());
         assertEquals(120000L, captured.get(1).getConvergencePolicy().getMaxDurationMs());
     }
+
+    @Test
+    void sessionTitleRequestUsesOnlyFirstQuestionWithoutToolsOrModelSession() {
+        RemoteCcRelayProperties properties = new RemoteCcRelayProperties();
+        properties.setArguments(new ArrayList<>(List.of("--print")));
+        List<RemoteCcExecutionRequest> captured = new ArrayList<>();
+        RemoteCcRelayService service = new RemoteCcRelayService(properties, executionRequest -> {
+            captured.add(executionRequest);
+            return new AiChatResponse("服务状态检查", "SUCCESS", "trace");
+        });
+        AiChatRequest request = new AiChatRequest();
+        request.setSystemPrompt("不应进入标题提示词");
+        request.setMessages(List.of(
+                new AiChatMessage("user", "检查服务状态"),
+                new AiChatMessage("assistant", "不应进入标题提示词的历史回复")));
+        request.setMetadata(new java.util.LinkedHashMap<>(Map.of(
+                "requestPurpose", RemoteCcRelayService.SESSION_TITLE_PURPOSE,
+                "sessionId", "session-1",
+                "modelSessionId", "must-not-be-used",
+                "resumeModelSession", true)));
+
+        service.relay(request);
+
+        assertEquals(1, captured.size());
+        RemoteCcExecutionRequest execution = captured.get(0);
+        assertEquals(List.of("--print", "--tools", ""), execution.getArguments());
+        assertTrue(execution.getPrompt().contains("用户问题：\n检查服务状态"));
+        assertFalse(execution.getPrompt().contains("Relay fixed responsibilities"));
+        assertFalse(execution.getPrompt().contains("不应进入标题提示词"));
+        assertFalse(execution.getPrompt().contains("历史回复"));
+        assertEquals(null, execution.getModelSessionId());
+        assertFalse(execution.isResumeModelSession());
+    }
 }

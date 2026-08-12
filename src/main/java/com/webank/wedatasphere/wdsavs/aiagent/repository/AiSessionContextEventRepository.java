@@ -17,4 +17,6 @@ public interface AiSessionContextEventRepository extends JpaRepository<AiSession
             String sessionId, Long cursor, Pageable pageable);
 
     Optional<AiSessionContextEventEntity> findTopBySessionIdOrderByIdDesc(String sessionId);
+
+    Optional<AiSessionContextEventEntity> findFirstBySessionIdAndRoleOrderByIdAsc(String sessionId, String role);
 }

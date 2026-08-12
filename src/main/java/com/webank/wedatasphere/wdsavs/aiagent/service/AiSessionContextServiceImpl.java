@@ -75,7 +75,7 @@ public class AiSessionContextServiceImpl implements AiSessionContextService {
     @Override
     @Transactional(readOnly = true)
     public long headCursor(String sessionId) {
-        sessionService.validateSession(sessionId);
+        sessionService.validateSessionExists(sessionId);
         return contextEventRepository.findTopBySessionIdOrderByIdDesc(sessionId)
                 .map(AiSessionContextEventEntity::getId)
                 .orElse(0L);
@@ -84,7 +84,7 @@ public class AiSessionContextServiceImpl implements AiSessionContextService {
     @Override
     @Transactional(readOnly = true)
     public List<AiSessionContextEventView> delta(String sessionId, long afterCursor, int limit) {
-        sessionService.validateSession(sessionId);
+        sessionService.validateSessionExists(sessionId);
         int effectiveLimit = limit <= 0 ? DEFAULT_LIMIT : Math.min(limit, MAX_LIMIT);
         long effectiveCursor = Math.max(afterCursor, 0L);
         return contextEventRepository.findBySessionIdAndIdGreaterThanOrderByIdAsc(

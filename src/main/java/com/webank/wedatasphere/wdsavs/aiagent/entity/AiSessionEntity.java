@@ -38,6 +38,9 @@ public class AiSessionEntity {
     @Column(name = "context_summary", columnDefinition = "TEXT")
     private String contextSummary;
 
+    @Column(name = "title")
+    private String title;
+
     @Column(name = "collaboration_mode")
     private String collaborationMode;
 

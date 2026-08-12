@@ -72,6 +72,8 @@ class UiCollaborationServiceTest {
         UiCollaborationService service = new UiCollaborationService(sessionService, contextService, registryService,
                 grantService, taskLifecycleService, taskEventService, a2aTaskService, taskRepository, new ObjectMapper());
         service.setCollaborationService(collaborationService);
+        SessionTitleService sessionTitleService = mock(SessionTitleService.class);
+        service.setSessionTitleService(sessionTitleService);
         UiSessionMessageRequest request = new UiSessionMessageRequest();
         request.setContent("请协同检查服务状态");
         request.setTargetNodeIds(List.of("node-a:18192", "node-b:18192"));
@@ -80,6 +82,7 @@ class UiCollaborationServiceTest {
 
         assertEquals(2, response.getAcceptedCount());
         assertEquals("node-b:18192", response.getCoordinatorNodeId());
+        verify(sessionTitleService).generateIfAbsentAsync("session-1", "node-b:18192");
         verify(contextService, times(1)).append(any(), any());
         verify(taskLifecycleService, times(2)).createTask(any());
         ArgumentCaptor<com.webank.wedatasphere.wdsavs.aiagent.model.A2aTaskCreateRequest> taskRequests =

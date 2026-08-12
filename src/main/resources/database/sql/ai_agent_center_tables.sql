@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS `wdsavs_ai_session` (
   `source_node_id` VARCHAR(128) DEFAULT NULL,
   `status` VARCHAR(32) NOT NULL,
   `context_summary` TEXT DEFAULT NULL,
+  `title` VARCHAR(128) DEFAULT NULL,
   `collaboration_mode` VARCHAR(32) DEFAULT NULL,
   `coordinator_node_id` VARCHAR(128) DEFAULT NULL,
   `coordinator_epoch` BIGINT DEFAULT NULL,

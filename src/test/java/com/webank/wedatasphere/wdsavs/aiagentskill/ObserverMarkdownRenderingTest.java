@@ -26,4 +26,16 @@ class ObserverMarkdownRenderingTest {
         assertFalse(page.contains("marked.min.js"));
         assertFalse(page.contains("markdown-it"));
     }
+
+    @Test
+    void doesNotSynchronizeClosedHistoricalSessions() throws IOException {
+        String page;
+        try (InputStream input = getClass().getResourceAsStream("/static/ccrelay-observer.html")) {
+            assertTrue(input != null);
+            page = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertTrue(page.contains("if (session.status === \"OPEN\")"));
+        assertTrue(page.contains("/sync`"));
+    }
 }

@@ -1,6 +1,6 @@
 param(
     [string]$OutRoot = (Join-Path $PSScriptRoot 'dist/skill'),
-    [switch]$SkipRuntimeBundle
+    [string]$ReleaseRoot = (Join-Path $PSScriptRoot 'dist/release')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,41 +65,54 @@ if (-not (Test-Path (Join-Path $tmpDir 'SKILL.md') -PathType Leaf)) {
     Fail 'Packaged SKILL.md missing'
 }
 
-if (-not $SkipRuntimeBundle) {
-    $runtimeBundleDir = Join-Path $tmpDir "assets/runtime-bundle/$skillName"
-    & (Join-Path $PSScriptRoot 'scripts/build_runtime_bundle.ps1') -BundleRoot $runtimeBundleDir
-    if (-not (Test-Path (Join-Path $runtimeBundleDir 'app.jar') -PathType Leaf)) {
-        Fail "Runtime app.jar missing: $runtimeBundleDir"
-    }
-    if (-not (Test-Path (Join-Path $runtimeBundleDir 'bin/start.sh') -PathType Leaf)) {
-        Fail "Runtime start.sh missing: $runtimeBundleDir"
-    }
-    if (-not (Test-Path (Join-Path $runtimeBundleDir 'bin/ccrelay-cli') -PathType Leaf)) {
-        Fail "Runtime Linux collaboration CLI missing: $runtimeBundleDir"
-    }
-    if (-not (Test-Path (Join-Path $runtimeBundleDir 'bin/ccrelay-cli.cmd') -PathType Leaf)) {
-        Fail "Runtime Windows collaboration CLI missing: $runtimeBundleDir"
-    }
-    if (-not (Test-Path (Join-Path $runtimeBundleDir 'runtime.tar.gz') -PathType Leaf)) {
-        Fail "Bundled Linux Java 21 archive missing: $runtimeBundleDir"
-    }
-    if (-not (Test-Path (Join-Path $runtimeBundleDir 'runtime-windows.zip') -PathType Leaf)) {
-        Fail "Bundled Windows Java 21 archive missing: $runtimeBundleDir"
-    }
-    if ((Test-Path (Join-Path $runtimeBundleDir 'runtime')) -or (Test-Path (Join-Path $runtimeBundleDir 'runtime-windows'))) {
-        Fail "Runtime bundle must not duplicate extracted JRE directories: $runtimeBundleDir"
-    }
-    if (-not (Test-Path (Join-Path $runtimeBundleDir 'python-windows/python.exe') -PathType Leaf)) {
-        Fail "Bundled Windows Python 3.13 missing: $runtimeBundleDir"
-    }
-    if (-not (Test-Path (Join-Path $runtimeBundleDir 'python-linux.tar.gz') -PathType Leaf)) {
-        Fail "Bundled Linux Python 3.13 missing: $runtimeBundleDir"
-    }
+$runtimeBundleDir = Join-Path $tmpDir "assets/runtime-bundle/$skillName"
+& (Join-Path $PSScriptRoot 'scripts/build_runtime_bundle.ps1') -BundleRoot $runtimeBundleDir
+if (-not (Test-Path (Join-Path $runtimeBundleDir 'app.jar') -PathType Leaf)) {
+    Fail "Runtime app.jar missing: $runtimeBundleDir"
+}
+if (-not (Test-Path (Join-Path $runtimeBundleDir 'bin/start.sh') -PathType Leaf)) {
+    Fail "Runtime start.sh missing: $runtimeBundleDir"
+}
+if (-not (Test-Path (Join-Path $runtimeBundleDir 'bin/ccrelay-cli') -PathType Leaf)) {
+    Fail "Runtime Linux collaboration CLI missing: $runtimeBundleDir"
+}
+if (-not (Test-Path (Join-Path $runtimeBundleDir 'bin/ccrelay-cli.cmd') -PathType Leaf)) {
+    Fail "Runtime Windows collaboration CLI missing: $runtimeBundleDir"
+}
+if (-not (Test-Path (Join-Path $runtimeBundleDir 'runtime.tar.gz') -PathType Leaf)) {
+    Fail "Bundled Linux Java 21 archive missing: $runtimeBundleDir"
+}
+if (-not (Test-Path (Join-Path $runtimeBundleDir 'runtime-windows.zip') -PathType Leaf)) {
+    Fail "Bundled Windows Java 21 archive missing: $runtimeBundleDir"
+}
+if ((Test-Path (Join-Path $runtimeBundleDir 'runtime')) -or (Test-Path (Join-Path $runtimeBundleDir 'runtime-windows'))) {
+    Fail "Runtime bundle must not duplicate extracted JRE directories: $runtimeBundleDir"
+}
+if (-not (Test-Path (Join-Path $runtimeBundleDir 'python-windows/python.exe') -PathType Leaf)) {
+    Fail "Bundled Windows Python 3.13 missing: $runtimeBundleDir"
+}
+if (-not (Test-Path (Join-Path $runtimeBundleDir 'python-linux.tar.gz') -PathType Leaf)) {
+    Fail "Bundled Linux Python 3.13 missing: $runtimeBundleDir"
 }
 
 Move-Item -Force $tmpDir $packageDir
 
+$bundledPython = Join-Path $packageDir 'assets/runtime-bundle/ccrelay/python-windows/python.exe'
+if (-not (Test-Path $bundledPython -PathType Leaf)) {
+    Fail "Bundled Python required for release packaging: $bundledPython"
+}
+& $bundledPython (Join-Path $PSScriptRoot 'scripts/package_skill_release.py') `
+    --full-skill-dir $packageDir `
+    --bootstrap-skill-dir (Join-Path $PSScriptRoot 'bootstrap-skill/ccrelay') `
+    --release-dir $ReleaseRoot `
+    --build-file (Join-Path $PSScriptRoot 'build.gradle')
+if ($LASTEXITCODE -ne 0) {
+    Fail 'Unable to create release ZIP packages'
+}
+
 Log 'Standard runnable skill directory created'
 Log "Output: $packageDir"
 Log "Runtime bundle: $(Join-Path $packageDir "assets/runtime-bundle/$skillName")"
+Log "Complete ZIP: $(Join-Path $ReleaseRoot 'ccrelay-full.zip')"
+Log "Bootstrap ZIP: $(Join-Path $ReleaseRoot 'ccrelay-bootstrap.zip')"
 Log "Install command: powershell -ExecutionPolicy Bypass -File scripts/install_codex_skill.ps1 $packageDir --force"

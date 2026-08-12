@@ -1770,10 +1770,12 @@
       const serial = ++state.requestSerial;
       if (!scrollState) renderLoading();
       let synchronizationFailure = null;
-      try {
-        await uiApi(`/ui/sessions/${encodeURIComponent(state.selectedSessionId)}/sync`, { method: "POST", body: "{}" });
-      } catch (error) {
-        synchronizationFailure = { nodeId: "sync", message: `任务状态同步失败：${error.message}` };
+      if (session.status === "OPEN") {
+        try {
+          await uiApi(`/ui/sessions/${encodeURIComponent(state.selectedSessionId)}/sync`, { method: "POST", body: "{}" });
+        } catch (error) {
+          synchronizationFailure = { nodeId: "sync", message: `任务状态同步失败：${error.message}` };
+        }
       }
       const results = await Promise.allSettled(nodeIds.map(async (nodeId) => {
         return await uiApi(`/ui/session-observations?sessionId=${encodeURIComponent(state.selectedSessionId)}&nodeId=${encodeURIComponent(nodeId)}&eventLimit=200&tailLines=200&maxBytes=131072`);

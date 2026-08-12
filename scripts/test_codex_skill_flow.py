@@ -80,6 +80,7 @@ def main() -> int:
     repo_root = Path(args.repo_root).expanduser().resolve()
     skill_dir = repo_root / "codex-skill" / "ccrelay"
     package_dir = repo_root / "dist" / "skill" / "ccrelay"
+    release_dir = repo_root / "dist" / "release"
     skill_md = skill_dir / "SKILL.md"
     validator = Path.home() / ".codex" / "skills" / ".system" / "skill-creator" / "scripts" / "quick_validate.py"
     installer = repo_root / "scripts" / "install_codex_skill.py"
@@ -90,6 +91,10 @@ def main() -> int:
     if not args.skip_build:
         run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(repo_root / "build.ps1")], cwd=repo_root)
     run([python_exe, str(validator), str(package_dir)], cwd=repo_root)
+    require((release_dir / "ccrelay-full.zip").is_file(), "Complete Skill ZIP is missing")
+    require((release_dir / "ccrelay-full.zip.sha256").is_file(), "Complete Skill checksum is missing")
+    require((release_dir / "ccrelay-bootstrap.zip").is_file(), "Bootstrap Skill ZIP is missing")
+    require((release_dir / "ccrelay-bootstrap.zip.sha256").is_file(), "Bootstrap Skill checksum is missing")
     install_output = run([python_exe, str(installer), str(package_dir), "--codex-home", str(codex_home), "--force"], cwd=repo_root)
     install_lines = [line for line in install_output.splitlines() if line.strip()]
     installed_path = Path(install_lines[0])

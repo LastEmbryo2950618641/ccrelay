@@ -62,6 +62,7 @@ public class UiCollaborationService {
     private final ObjectMapper objectMapper;
     private TaskObservationService taskObservationService;
     private AiSessionCollaborationService collaborationService;
+    private SessionTitleService sessionTitleService;
 
     public UiCollaborationService(AiSessionService sessionService,
                                   AiSessionContextService contextService,
@@ -93,6 +94,11 @@ public class UiCollaborationService {
         this.collaborationService = collaborationService;
     }
 
+    @Autowired(required = false)
+    public void setSessionTitleService(SessionTitleService sessionTitleService) {
+        this.sessionTitleService = sessionTitleService;
+    }
+
     public UiSessionMessageResponse send(String sessionId, UiSessionMessageRequest request) {
         sessionService.validateSession(sessionId);
         String content = requireText(request == null ? null : request.getContent(), "content");
@@ -104,6 +110,9 @@ public class UiCollaborationService {
                 request == null ? null : request.getCollaborationMode(), targetNodeIds,
                 request == null ? null : request.getCollaborationPolicy());
         String messageEventId = appendUserMessage(sessionId, content, sourceNodeId, targetNodeIds);
+        if (sessionTitleService != null && collaboration != null) {
+            sessionTitleService.generateIfAbsentAsync(sessionId, collaboration.getCoordinatorNodeId());
+        }
 
         List<Map<String, Object>> submissions = new ArrayList<>();
         for (String targetNodeId : targetNodeIds) {

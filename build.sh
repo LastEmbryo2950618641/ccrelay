@@ -5,6 +5,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SKILL_NAME="ccrelay"
 SRC_DIR="$SCRIPT_DIR/codex-skill/$SKILL_NAME"
 OUT_ROOT="${1:-$SCRIPT_DIR/dist/skill}"
+RELEASE_ROOT="${2:-$SCRIPT_DIR/dist/release}"
 PACKAGE_DIR="$OUT_ROOT/$SKILL_NAME"
 TMP_DIR="$OUT_ROOT/.tmp-$SKILL_NAME"
 RUNTIME_SOURCE="$SCRIPT_DIR/build/runtime-bundle/$SKILL_NAME"
@@ -49,7 +50,17 @@ cp -R "$RUNTIME_SOURCE" "$RUNTIME_TARGET"
 
 mv "$TMP_DIR" "$PACKAGE_DIR"
 
+PYTHON_COMMAND=$(command -v python3 || command -v python || true)
+[ -n "$PYTHON_COMMAND" ] || fail "Python 3 is required for release packaging"
+"$PYTHON_COMMAND" "$SCRIPT_DIR/scripts/package_skill_release.py" \
+  --full-skill-dir "$PACKAGE_DIR" \
+  --bootstrap-skill-dir "$SCRIPT_DIR/bootstrap-skill/ccrelay" \
+  --release-dir "$RELEASE_ROOT" \
+  --build-file "$SCRIPT_DIR/build.gradle"
+
 log "Standard runnable skill directory created"
 log "Output: $PACKAGE_DIR"
 log "Runtime bundle: $PACKAGE_DIR/assets/runtime-bundle/$SKILL_NAME"
+log "Complete ZIP: $RELEASE_ROOT/ccrelay-full.zip"
+log "Bootstrap ZIP: $RELEASE_ROOT/ccrelay-bootstrap.zip"
 log "Install command: powershell -ExecutionPolicy Bypass -File scripts/install_codex_skill.ps1 $PACKAGE_DIR --force"

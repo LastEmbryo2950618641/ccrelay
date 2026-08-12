@@ -66,6 +66,22 @@ class AiSessionServiceImplTest {
         assertTrue(exception.getMessage().contains("Session is not open"));
     }
 
+    @Test
+    void validateSessionExistsAllowsClosedSession() {
+        AiSessionRepository sessionRepository = mock(AiSessionRepository.class);
+        AiRelayGrantRepository grantRepository = mock(AiRelayGrantRepository.class);
+        AiSessionEntity session = new AiSessionEntity();
+        session.setSessionId("session-closed-1");
+        session.setStatus("CLOSED");
+
+        when(sessionRepository.findBySessionId("session-closed-1")).thenReturn(Optional.of(session));
+
+        AiSessionServiceImpl service = new AiSessionServiceImpl(sessionRepository, grantRepository);
+        service.validateSessionExists("session-closed-1");
+
+        verify(sessionRepository).findBySessionId("session-closed-1");
+    }
+
     private AiRelayGrantEntity grant(String grantId, String status) {
         AiRelayGrantEntity entity = new AiRelayGrantEntity();
         entity.setGrantId(grantId);

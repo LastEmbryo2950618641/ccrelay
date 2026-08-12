@@ -38,6 +38,7 @@ class SkillNodeObservationControllerTest {
 
         assertEquals(1, sessions.size());
         assertEquals("session-1", sessions.get(0).get("sessionId"));
+        assertEquals("服务状态检查", sessions.get(0).get("title"));
         assertEquals(3, sessions.get(0).get("taskCount"));
         assertEquals(List.of("node-a:18192", "node-b:18192"), sessions.get(0).get("nodeIds"));
     }
@@ -74,6 +75,7 @@ class SkillNodeObservationControllerTest {
         AiSessionEntity entity = new AiSessionEntity();
         entity.setSessionId(sessionId);
         entity.setStatus(status);
+        entity.setTitle("服务状态检查");
         entity.setUpdateTime(updateTime);
         return entity;
     }

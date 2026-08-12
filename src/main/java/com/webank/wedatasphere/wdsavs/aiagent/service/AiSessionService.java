@@ -10,5 +10,7 @@ public interface AiSessionService {
 
     void validateSession(String sessionId);
 
+    void validateSessionExists(String sessionId);
+
     void bindTask(String sessionId, AiTaskCreateRequest request);
 }

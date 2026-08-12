@@ -60,14 +60,23 @@ public class AiSessionServiceImpl implements AiSessionService {
 
     @Override
     public void validateSession(String sessionId) {
-        if (sessionId == null || sessionId.trim().isEmpty()) {
-            throw new IllegalArgumentException("sessionId is required");
-        }
-        AiSessionEntity entity = sessionRepository.findBySessionId(sessionId)
-                .orElseThrow(() -> new IllegalArgumentException("Session not found: " + sessionId));
+        AiSessionEntity entity = requireSession(sessionId);
         if (!AiSessionStatus.OPEN.name().equalsIgnoreCase(entity.getStatus())) {
             throw new IllegalArgumentException("Session is not open: " + sessionId);
         }
+    }
+
+    @Override
+    public void validateSessionExists(String sessionId) {
+        requireSession(sessionId);
+    }
+
+    private AiSessionEntity requireSession(String sessionId) {
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            throw new IllegalArgumentException("sessionId is required");
+        }
+        return sessionRepository.findBySessionId(sessionId)
+                .orElseThrow(() -> new IllegalArgumentException("Session not found: " + sessionId));
     }
 
     @Override

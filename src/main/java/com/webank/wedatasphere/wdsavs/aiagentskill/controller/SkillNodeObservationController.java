@@ -116,6 +116,7 @@ public class SkillNodeObservationController {
         view.put("initiatorType", session.getInitiatorType());
         view.put("initiatorId", session.getInitiatorId());
         view.put("sourceNodeId", session.getSourceNodeId());
+        view.put("title", session.getTitle());
         view.put("createTime", session.getCreateTime());
         view.put("updateTime", session.getUpdateTime());
         view.put("taskCount", tasks.size());

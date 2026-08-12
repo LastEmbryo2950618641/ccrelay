@@ -16,6 +16,8 @@ import java.util.UUID;
 
 public class RemoteCcRelayService {
 
+    static final String SESSION_TITLE_PURPOSE = "SESSION_TITLE";
+
     private static final List<String> DEFAULT_CLAUDE_PERMISSION_ALLOW = List.of(
             "Bash(*)",
             "Read(*)",
@@ -77,6 +79,10 @@ public class RemoteCcRelayService {
         RemoteCcExecutionRequest executionRequest = new RemoteCcExecutionRequest();
         executionRequest.setCommand(properties.getCommand());
         executionRequest.setArguments(properties.getArguments() == null ? List.of() : new ArrayList<>(properties.getArguments()));
+        if (isSessionTitleRequest(request)) {
+            executionRequest.getArguments().add("--tools");
+            executionRequest.getArguments().add("");
+        }
         executionRequest.setWorkingDirectory(workingDirectory(request));
         executionRequest.setClaudeSettingsFile(properties.getClaudeSettingsFilePath());
         executionRequest.setConvergencePolicy(convergencePolicy(request, maxDurationMs));
@@ -90,8 +96,10 @@ public class RemoteCcRelayService {
         request.setMetadata(metadata);
         executionRequest.setClaudeSettingsJson(claudeSettingsJson(ReactExecutionPolicy.fromParams(metadata)));
         executionRequest.setPrompt(prompt(request, metadata));
-        executionRequest.setModelSessionId(stringValue(metadata.get("modelSessionId")));
-        executionRequest.setResumeModelSession(booleanValue(metadata.get("resumeModelSession")));
+        if (!isSessionTitleRequest(request)) {
+            executionRequest.setModelSessionId(stringValue(metadata.get("modelSessionId")));
+            executionRequest.setResumeModelSession(booleanValue(metadata.get("resumeModelSession")));
+        }
         Map<String, String> environment = new java.util.LinkedHashMap<>();
         putEnvironment(environment, "WDSAVS_AI_RELAY_NODE_ID", properties.getNodeId());
         putEnvironment(environment, "WDSAVS_AI_RELAY_SESSION_ID", stringValue(metadata.get("sessionId")));
@@ -239,6 +247,9 @@ public class RemoteCcRelayService {
     }
 
     private String prompt(AiChatRequest request, Map<String, Object> metadata) {
+        if (isSessionTitleRequest(request)) {
+            return sessionTitlePrompt(request);
+        }
         StringBuilder prompt = new StringBuilder();
         ClaudeCodeConvergencePolicy policy = convergencePolicy(request, null);
         prompt.append("Relay fixed responsibilities (highest priority):\n")
@@ -277,5 +288,20 @@ public class RemoteCcRelayService {
             }
         }
         return prompt.toString();
+    }
+
+    private boolean isSessionTitleRequest(AiChatRequest request) {
+        return request != null && request.getMetadata() != null
+                && SESSION_TITLE_PURPOSE.equals(String.valueOf(request.getMetadata().get("requestPurpose")));
+    }
+
+    private String sessionTitlePrompt(AiChatRequest request) {
+        String topic = "";
+        if (request.getMessages() != null && !request.getMessages().isEmpty()) {
+            topic = AiChatMessageFormatter.modelContent(request.getMessages().get(0));
+        }
+        return "请根据下面的用户问题生成一个简洁准确的中文会话标题。\n"
+                + "要求：只输出标题，不要引号、解释、Markdown 或句末标点；不超过20个汉字或40个字符。\n\n"
+                + "用户问题：\n" + topic;
     }
 }

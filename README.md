@@ -18,11 +18,12 @@ CC Relay 是面向所有支持标准 Skill 的 AI 产品的远端多 Agent 协�
 ## 标准 Skill 包
 
 - 技能源目录：`codex-skill/ccrelay`
-- 打包标准可运行技能目录（Linux/macOS shell）：`bash build.sh`
-- 打包标准可运行技能目录（Windows PowerShell）：`powershell -ExecutionPolicy Bypass -File build.ps1`
+- 统一打包完整 Skill 与一次性引导 Skill（Linux/macOS shell）：`bash build.sh`
+- 统一打包完整 Skill 与一次性引导 Skill（Windows PowerShell）：`powershell -ExecutionPolicy Bypass -File build.ps1`
 - 打包后的技能输出：`dist/skill/ccrelay`
+- 完整 Skill ZIP：`dist/release/ccrelay-full.zip`
+- 一次性引导 Skill ZIP：`dist/release/ccrelay-bootstrap.zip`
 - 技能内置运行时位置：`dist/skill/ccrelay/assets/runtime-bundle/ccrelay`
-- 发布别名输出：`dist/release/ccrelay`
 - 校验技能：`powershell -ExecutionPolicy Bypass -File scripts/validate_codex_skill.ps1`
 - 安装源目录到本地 Skill 目录：`powershell -ExecutionPolicy Bypass -File scripts/install_codex_skill.ps1 codex-skill/ccrelay --force`
 - 安装打包后的 Skill：`powershell -ExecutionPolicy Bypass -File scripts/install_codex_skill.ps1 dist/skill/ccrelay --force`
@@ -41,9 +42,10 @@ CC Relay 是面向所有支持标准 Skill 的 AI 产品的远端多 Agent 协�
 
 仓库内置 `.github/workflows/build-skill-zip.yml`：
 
-- 推送到 `main` 或在 Actions 页面手动运行时，构建完整的自包含 Skill ZIP，并保留为 30 天的工作流产物。
-- 推送 `v*` 标签时，除生成工作流产物外，还会创建或更新对应 GitHub Release，并上传 ZIP 与 SHA-256 文件。
-- ZIP 名称格式为 `ccrelay-<version>-<short-sha>.zip`，解压后顶层目录为 `ccrelay/`。
+- 本地构建与 GitHub Actions 调用同一个打包器，统一生成 `ccrelay-full.zip` 和 `ccrelay-bootstrap.zip`，并分别生成 SHA-256 文件。
+- `ccrelay-full.zip` 是包含 JAR、Windows/Linux JRE、内置 Python、Claude Code 和全部脚本的完整自包含 Skill。
+- `ccrelay-bootstrap.zip` 是一次性引导 Skill；首次使用时默认从 GitHub 最新 Release 下载并校验完整包，覆盖自身后立即按完整 Skill 继续工作，不承担后续版本检查。
+- 推送 `v*` 标签时会创建或更新对应 GitHub Release，上传两类 ZIP、校验文件和发布清单，并将该成功发布的版本设为 GitHub Latest Release。两个 ZIP 解压后的顶层目录均为 `ccrelay/`。
 
 ## 任务观测
 
