@@ -2162,6 +2162,26 @@ class CcRelayCliTest(unittest.TestCase):
             self.assertIn("http://127.0.0.1:18192/api/skill/relay/register", script)
             self.assertIn("http://192.0.2.20:18193/api/ai/remote-cc/chat", script)
 
+    def test_center_start_scripts_reclaim_only_current_bundle_processes_before_port_check(self):
+        linux = ccrelay_center.linux_start_script(
+            "/home/ccrelay/ccrelay/node-18192", 18192, "secret",
+        )
+        windows = ccrelay_center.windows_start_script(
+            "C:/Users/ccrelay/ccrelay/node-18192", 18192, "secret",
+        )
+
+        self.assertIn('index($0, " -jar " app)', linux)
+        self.assertIn('app="$bundle/app.jar"', linux)
+        self.assertIn("/proc/net/tcp", linux)
+        self.assertIn("CCRELAY_CENTER_PORT_IN_USE|port=%s", linux)
+        self.assertNotIn('old_pid=$(cat "$bundle/center.pid"', linux)
+
+        self.assertIn("Get-CimInstance Win32_Process", windows)
+        self.assertIn("CommandLine.IndexOf($app", windows)
+        self.assertIn("TcpListener", windows)
+        self.assertIn("CCRELAY_CENTER_PORT_IN_USE|port=18192", windows)
+        self.assertNotIn("Get-Content $pidFile", windows)
+
     @patch.object(ccrelay_center, "run_command", return_value={"success": False, "summary": "relay exited"})
     def test_center_relay_start_failure_is_not_treated_as_ready(self, run_command):
         result = ccrelay_center.start_remote_relay(

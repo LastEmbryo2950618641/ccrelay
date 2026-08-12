@@ -1517,6 +1517,34 @@ def linux_start_script(directory: str, port: int, hmac_secret: str) -> str:
     return f"""export PATH="{ccrelay_ssh.REMOTE_POSIX_PATH}:$PATH"
 set -eu
 bundle={shlex.quote(directory)}
+app="$bundle/app.jar"
+owned_pids="$(ps -eo pid=,args= 2>/dev/null | awk -v app="$app" 'index($0, " -jar " app) {{print $1}}')"
+if [ -n "$owned_pids" ]; then
+  kill $owned_pids >/dev/null 2>&1 || true
+  attempts=0
+  while [ "$attempts" -lt 10 ]; do
+    remaining=''
+    for pid in $owned_pids; do kill -0 "$pid" >/dev/null 2>&1 && remaining="$remaining $pid" || true; done
+    [ -z "$remaining" ] && break
+    owned_pids="$remaining"
+    attempts=$((attempts + 1))
+    sleep 1
+  done
+  [ -z "$remaining" ] || kill -9 $remaining >/dev/null 2>&1 || true
+fi
+rm -f "$bundle/center.pid"
+port_in_use=false
+if [ -r /proc/net/tcp ]; then
+  port_hex=$(printf '%04X' {port})
+  tcp_tables=/proc/net/tcp
+  [ ! -r /proc/net/tcp6 ] || tcp_tables="$tcp_tables /proc/net/tcp6"
+  awk -v suffix=":$port_hex" 'NR > 1 && $4 == "0A" && substr($2, length($2) - length(suffix) + 1) == suffix {{found=1}} END {{exit found ? 0 : 1}}' $tcp_tables 2>/dev/null && port_in_use=true || true
+elif command -v ss >/dev/null 2>&1; then
+  ss -ltn 2>/dev/null | awk '{{print $4}}' | grep -Eq '[:.]'{port}'$' && port_in_use=true || true
+elif command -v netstat >/dev/null 2>&1; then
+  netstat -ltn 2>/dev/null | awk '{{print $4}}' | grep -Eq '[:.]'{port}'$' && port_in_use=true || true
+fi
+[ "$port_in_use" = false ] || {{ printf 'CCRELAY_CENTER_PORT_IN_USE|port=%s\n' {port} >&2; exit 42; }}
 runtime_tmp="$bundle/.runtime-extract.$$"
 rm -rf "$runtime_tmp"
 mkdir -p "$runtime_tmp"
@@ -1526,10 +1554,6 @@ mv "$runtime_tmp" "$bundle/runtime"
 java_bin="$bundle/runtime/bin/java"
 test -f "$bundle/app.jar"
 test -x "$java_bin" || chmod +x "$java_bin"
-if [ -f "$bundle/center.pid" ]; then
-  old_pid=$(cat "$bundle/center.pid" 2>/dev/null || true)
-  [ -z "$old_pid" ] || kill "$old_pid" >/dev/null 2>&1 || true
-fi
 export CCRELAY_PORT={port}
 export CCRELAY_DB="$bundle/center-skill.db"
 export WDSAVS_AI_HMAC_SECRET={shlex.quote(hmac_secret)}
@@ -1545,6 +1569,26 @@ def windows_start_script(directory: str, port: int, hmac_secret: str) -> str:
         return "'" + value.replace("'", "''") + "'"
     return f"""$ErrorActionPreference = 'Stop'
 $bundle = {ps(directory)}
+$app = Join-Path $bundle 'app.jar'
+$owned = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {{ $_.CommandLine -and $_.CommandLine.IndexOf($app, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.CommandLine -match '(^|\\s)-jar(\\s|$)' }})
+foreach ($item in $owned) {{ Stop-Process -Id $item.ProcessId -Force -ErrorAction SilentlyContinue }}
+$pidFile = Join-Path $bundle 'center.pid'
+Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+$portAvailable = $false
+$deadline = (Get-Date).AddSeconds(10)
+do {{
+  $listener = $null
+  try {{
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, {port})
+    $listener.Start()
+    $portAvailable = $true
+  }} catch {{
+    Start-Sleep -Seconds 1
+  }} finally {{
+    if ($listener) {{ $listener.Stop() }}
+  }}
+}} while (-not $portAvailable -and (Get-Date) -lt $deadline)
+if (-not $portAvailable) {{ throw 'CCRELAY_CENTER_PORT_IN_USE|port={port}' }}
 $runtime = Join-Path $bundle 'runtime-windows'
 $runtimeTemp = Join-Path $bundle ('.runtime-extract-' + [Guid]::NewGuid().ToString('N'))
 Expand-Archive -Path (Join-Path $bundle 'runtime-windows.zip') -DestinationPath $runtimeTemp -Force
@@ -1553,8 +1597,6 @@ Move-Item -Force (Get-ChildItem $runtimeTemp | Select-Object -First 1).FullName 
 Remove-Item -Recurse -Force $runtimeTemp -ErrorAction SilentlyContinue
 $java = Join-Path $bundle 'runtime-windows/bin/java.exe'
 if (-not (Test-Path $java)) {{ throw 'Bundled Windows JRE missing' }}
-$pidFile = Join-Path $bundle 'center.pid'
-if (Test-Path $pidFile) {{ $oldPid = Get-Content $pidFile -ErrorAction SilentlyContinue; if ($oldPid) {{ Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue }} }}
 $env:CCRELAY_PORT = '{port}'
 $env:CCRELAY_DB = Join-Path $bundle 'center-skill.db'
 $env:WDSAVS_AI_HMAC_SECRET = {ps(hmac_secret)}
