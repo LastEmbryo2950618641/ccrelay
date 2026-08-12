@@ -13,6 +13,34 @@ import package_skill_release
 
 class ReleasePackageTest(unittest.TestCase):
 
+    def test_bootstrap_bundles_verified_7zip_tools(self):
+        repository = Path(__file__).resolve().parents[1]
+        seven_zip_root = repository / "bootstrap-skill/ccrelay/assets/7zip"
+        checksum_path = seven_zip_root / "SHA256SUMS"
+        notice_path = seven_zip_root / "NOTICE.txt"
+        expected_tools = {
+            "windows-x64/7zr.exe",
+            "linux-x64/7zz",
+            "macos-x64/7zz",
+            "macos-arm64/7zz",
+        }
+
+        checksums = {}
+        for line in checksum_path.read_text(encoding="ascii").splitlines():
+            digest, relative = line.split(maxsplit=1)
+            checksums[relative.lstrip("* ")] = digest.lower()
+
+        self.assertEqual(expected_tools, set(checksums))
+        for relative, expected_digest in checksums.items():
+            tool = seven_zip_root / relative
+            self.assertTrue(tool.is_file(), f"Bundled 7-Zip tool is missing: {relative}")
+            self.assertEqual(expected_digest, hashlib.sha256(tool.read_bytes()).hexdigest())
+
+        notice = notice_path.read_text(encoding="utf-8")
+        self.assertIn("7-Zip", notice)
+        self.assertIn("GNU LGPL", notice)
+        self.assertIn("https://www.7-zip.org/", notice)
+
     def test_gitee_build_makes_gradle_wrapper_executable_before_detecting_it(self):
         repository = Path(__file__).resolve().parents[1]
         build_script = (repository / "scripts/gitee_go_build.sh").read_text(encoding="utf-8")

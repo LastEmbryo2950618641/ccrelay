@@ -1,0 +1,19 @@
+This bootstrap package includes unmodified command-line components from 7-Zip 26.02.
+
+7-Zip is free software. Most source code is licensed under the GNU LGPL;
+some components use the BSD 3-clause license, and some unRAR code has an
+additional restriction. Copyright and license details are available from:
+
+https://www.7-zip.org/license.txt
+https://www.7-zip.org/
+
+The corresponding source code can be obtained from the official 7-Zip site:
+
+https://www.7-zip.org/download.html
+
+Bundled files:
+
+- windows-x64/7zr.exe: official standalone Windows console executable
+- linux-x64/7zz: official Linux x86-64 console executable
+- macos-x64/7zz: official universal macOS console executable
+- macos-arm64/7zz: official universal macOS console executable
