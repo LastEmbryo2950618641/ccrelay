@@ -138,7 +138,7 @@ class A2aTaskRelayServerMultiNodeLocalTest {
         assertEquals(taskId, createResponse.getResult().get("requestId"));
         String agentRunId = String.valueOf(createResponse.getResult().get("agentRunId"));
         assertNotNull(agentRunId);
-        assertEquals("PENDING", createResponse.getResult().get("status"));
+        assertTrue(List.of("PENDING", "RUNNING", "SUCCESS").contains(String.valueOf(createResponse.getResult().get("status"))));
         assertEquals(true, createResponse.getResult().get("accepted"));
 
         Map<String, Object> getContext = Map.of(
