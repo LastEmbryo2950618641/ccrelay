@@ -6,8 +6,10 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import package_skill_release
+import publish_gitee_release
 
 
 class ReleasePackageTest(unittest.TestCase):
@@ -26,8 +28,16 @@ class ReleasePackageTest(unittest.TestCase):
         self.assertIn("if: github.event_name == 'workflow_dispatch'", workflow)
         self.assertIn('release_tag="v$version"', workflow)
         self.assertIn('gh release edit "$release_tag" --latest', workflow)
+        self.assertIn("python scripts/publish_gitee_release.py", workflow)
+        self.assertIn("GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}", workflow)
+        self.assertIn('--tag "v$version"', workflow)
         windows_bootstrap = (repository / "bootstrap-skill/ccrelay/scripts/install-latest.ps1").read_text(encoding="utf-8")
         shell_bootstrap = (repository / "bootstrap-skill/ccrelay/scripts/install-latest.sh").read_text(encoding="utf-8")
+        self.assertLess(windows_bootstrap.index("gitee.com"), windows_bootstrap.index("github.com"))
+        self.assertLess(shell_bootstrap.index("gitee.com"), shell_bootstrap.index("github.com"))
+        self.assertIn("ConvertFrom-Json", windows_bootstrap)
+        self.assertIn("download_gitee_package", shell_bootstrap)
+        self.assertIn("attach_files/$archive_id/download", shell_bootstrap)
         self.assertIn("Invoke-WebRequest", windows_bootstrap)
         self.assertIn("attempt = 1", windows_bootstrap)
         self.assertIn('attempt=1', shell_bootstrap)
@@ -71,6 +81,44 @@ class ReleasePackageTest(unittest.TestCase):
             self.assert_checksum(release / "ccrelay-bootstrap.zip")
             stored_manifest = json.loads((release / "release-manifest.json").read_text(encoding="utf-8"))
             self.assertEqual("0.1.1", stored_manifest["version"])
+
+    def test_gitee_publish_replaces_release_assets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            release_dir = Path(temporary)
+            for name in publish_gitee_release.ASSET_NAMES:
+                self.write(release_dir / name, name)
+            client = mock.Mock()
+            client.owner = "owner"
+            client.repo = "repo"
+            client.release_by_tag.return_value = {"id": 42}
+            client.request.side_effect = [
+                {"id": 42},
+                [{"id": 7, "name": "ccrelay-full.zip"}, {"id": 8, "name": "keep.txt"}],
+                None,
+                [{"name": name} for name in publish_gitee_release.ASSET_NAMES],
+            ]
+            client.upload.side_effect = lambda _release_id, path: {
+                "name": path.name,
+                "size": path.stat().st_size,
+            }
+            args = mock.Mock(
+                owner="owner",
+                repo="repo",
+                release_dir=str(release_dir),
+                target_commitish="v0.1.1",
+                tag="latest",
+                name="Latest CC Relay build",
+            )
+            with mock.patch.dict("os.environ", {"GITEE_TOKEN": "test-token"}), mock.patch.object(
+                publish_gitee_release, "GiteeClient", return_value=client
+            ):
+                result = publish_gitee_release.publish(args)
+
+            self.assertEqual(42, result["releaseId"])
+            self.assertEqual(5, len(result["assets"]))
+            delete_calls = [call for call in client.request.call_args_list if call.args[0] == "DELETE"]
+            self.assertEqual(1, len(delete_calls))
+            self.assertIn("/attach_files/7", delete_calls[0].args[1])
 
     def assert_checksum(self, archive: Path) -> None:
         expected = (archive.with_name(archive.name + ".sha256").read_text(encoding="ascii").split()[0])

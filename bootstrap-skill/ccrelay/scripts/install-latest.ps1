@@ -1,5 +1,7 @@
 param(
-    [string]$ReleaseBaseUrl = 'https://github.com/LastEmbryo2950618641/ccrelay/releases/latest/download'
+    [string]$ReleaseBaseUrl = '',
+    [string]$GiteeApiBaseUrl = 'https://gitee.com/api/v5/repos/nekoneko-acg/ccrelay',
+    [string]$GitHubReleaseBaseUrl = 'https://github.com/LastEmbryo2950618641/ccrelay/releases/latest/download'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,7 +13,6 @@ $backupRoot = Join-Path $installRoot ".ccrelay-bootstrap-$operationId"
 $archivePath = Join-Path $workRoot 'ccrelay-full.zip'
 $checksumPath = Join-Path $workRoot 'ccrelay-full.zip.sha256'
 $extractRoot = Join-Path $workRoot 'extracted'
-$downloadBase = $ReleaseBaseUrl.TrimEnd('/')
 
 function Download-File {
     param([string]$Url, [string]$Destination)
@@ -30,21 +31,74 @@ function Download-File {
     }
     Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
     try {
-        Invoke-WebRequest -UseBasicParsing $Url -OutFile $Destination
+        Invoke-WebRequest -UseBasicParsing $Url -OutFile $Destination -TimeoutSec 1800
     } catch {
         throw "Download failed: $Url. $($_.Exception.Message)"
     }
 }
 
+function Download-Package {
+    param([string]$BaseUrl)
+    $downloadBase = $BaseUrl.TrimEnd('/')
+    try {
+        Download-File "$downloadBase/ccrelay-full.zip" $archivePath
+        Download-File "$downloadBase/ccrelay-full.zip.sha256" $checksumPath
+        $expected = ((Get-Content -Raw $checksumPath).Trim() -split '\s+')[0].ToLowerInvariant()
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($expected) -or $expected -ne $actual) {
+            throw 'SHA-256 verification failed'
+        }
+        Write-Output "CC Relay package source: $downloadBase"
+        return $true
+    } catch {
+        Write-Warning "CC Relay package source failed: $downloadBase. $($_.Exception.Message)"
+        Remove-Item -LiteralPath $archivePath, $checksumPath -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+}
+
+function Download-GiteePackage {
+    $apiBase = $GiteeApiBaseUrl.TrimEnd('/')
+    $releaseMetadata = Join-Path $workRoot 'gitee-release.json'
+    $attachmentMetadata = Join-Path $workRoot 'gitee-attachments.json'
+    try {
+        Download-File "$apiBase/releases/latest" $releaseMetadata
+        $release = Get-Content -Raw $releaseMetadata | ConvertFrom-Json
+        if (-not $release.id) {
+            throw 'Gitee latest Release does not contain an id'
+        }
+        Download-File "$apiBase/releases/$($release.id)/attach_files" $attachmentMetadata
+        $attachments = @(Get-Content -Raw $attachmentMetadata | ConvertFrom-Json)
+        $archive = $attachments | Where-Object { $_.name -eq 'ccrelay-full.zip' } | Select-Object -First 1
+        $checksum = $attachments | Where-Object { $_.name -eq 'ccrelay-full.zip.sha256' } | Select-Object -First 1
+        if (-not $archive.id -or -not $checksum.id) {
+            throw 'Gitee latest Release does not contain the complete package assets'
+        }
+        Download-File "$apiBase/releases/$($release.id)/attach_files/$($archive.id)/download" $archivePath
+        Download-File "$apiBase/releases/$($release.id)/attach_files/$($checksum.id)/download" $checksumPath
+        $expected = ((Get-Content -Raw $checksumPath).Trim() -split '\s+')[0].ToLowerInvariant()
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($expected) -or $expected -ne $actual) {
+            throw 'SHA-256 verification failed'
+        }
+        Write-Output "CC Relay package source: $apiBase/releases/latest"
+        return $true
+    } catch {
+        Write-Warning "CC Relay Gitee source failed: $apiBase. $($_.Exception.Message)"
+        Remove-Item -LiteralPath $archivePath, $checksumPath, $releaseMetadata, $attachmentMetadata -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+}
+
 try {
     New-Item -ItemType Directory -Force -Path $workRoot, $extractRoot | Out-Null
-    Download-File "$downloadBase/ccrelay-full.zip" $archivePath
-    Download-File "$downloadBase/ccrelay-full.zip.sha256" $checksumPath
-
-    $expected = ((Get-Content -Raw $checksumPath).Trim() -split '\s+')[0].ToLowerInvariant()
-    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
-    if ([string]::IsNullOrWhiteSpace($expected) -or $expected -ne $actual) {
-        throw "SHA-256 verification failed for ccrelay-full.zip"
+    $downloaded = if ([string]::IsNullOrWhiteSpace($ReleaseBaseUrl)) {
+        (Download-GiteePackage) -or (Download-Package $GitHubReleaseBaseUrl)
+    } else {
+        Download-Package $ReleaseBaseUrl
+    }
+    if (-not $downloaded) {
+        throw 'Unable to download and verify the CC Relay complete package from any release source'
     }
 
     Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force
