@@ -15,7 +15,7 @@ import threading
 import time
 import unittest
 import zipfile
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from unittest.mock import call, patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PureWindowsPath
@@ -2245,29 +2245,34 @@ class CcRelayCliTest(unittest.TestCase):
             },
         }
         config = {"runtime": {}, "clusterIdentity": {}}
-        with patch.object(ccrelay_center, "skill_root", return_value=Path("C:/skill")), \
-                patch.object(Path, "is_file", return_value=True), \
-                patch.object(ccrelay_center.ccrelay_ssh, "load_config", return_value=config), \
-                patch.object(ccrelay_center, "runtime_access", return_value={"username": "ccrelay"}), \
-                patch.object(ccrelay_center, "create_remote_directory", return_value={"success": True}), \
-                patch.object(ccrelay_center, "center_bundle_sources", return_value=[Path("C:/bundle/app.jar")]), \
-                patch.object(ccrelay_center.ccrelay_ssh, "copy_to_remote", return_value={"success": True}), \
-                patch.object(ccrelay_center, "start_remote_center", return_value={"success": True}), \
-                patch.object(ccrelay_center, "wait_remote_health", return_value={"success": True}), \
-                patch.object(ccrelay_center, "wait_health", return_value={"status": "UP"}), \
-                patch.object(ccrelay_center, "verify_from_candidates", return_value={"status": "NOT_APPLICABLE"}), \
-                patch.object(ccrelay_center, "sync_relay_artifacts", return_value={"success": True}), \
-                patch.object(ccrelay_center, "start_remote_relay", return_value={"success": True}), \
-                patch.object(ccrelay_center, "wait_remote_relay_health", return_value={"success": True}), \
-                patch.object(ccrelay_center, "wait_center_relay_registration", return_value={
-                    "success": False, "summary": "registration timeout",
-                }), \
-                patch.object(ccrelay_center, "diagnose_remote_center", return_value={"success": True}), \
-                patch.object(ccrelay_center, "diagnose_remote_relay", return_value={"success": True}), \
-                patch.object(ccrelay_center, "save_bootstrap_attempt", return_value=Path("C:/attempt.json")), \
-                patch.object(ccrelay_center, "stop_remote_center", return_value={"success": True}), \
-                patch.object(ccrelay_center, "save_state", return_value=Path("C:/state.json")), \
-                patch.object(ccrelay_center.ccrelay_ssh, "save_config"):
+        patches = [
+            patch.object(ccrelay_center, "skill_root", return_value=Path("C:/skill")),
+            patch.object(Path, "is_file", return_value=True),
+            patch.object(ccrelay_center.ccrelay_ssh, "load_config", return_value=config),
+            patch.object(ccrelay_center, "runtime_access", return_value={"username": "ccrelay"}),
+            patch.object(ccrelay_center, "create_remote_directory", return_value={"success": True}),
+            patch.object(ccrelay_center, "center_bundle_sources", return_value=[Path("C:/bundle/app.jar")]),
+            patch.object(ccrelay_center.ccrelay_ssh, "copy_to_remote", return_value={"success": True}),
+            patch.object(ccrelay_center, "start_remote_center", return_value={"success": True}),
+            patch.object(ccrelay_center, "wait_remote_health", return_value={"success": True}),
+            patch.object(ccrelay_center, "wait_health", return_value={"status": "UP"}),
+            patch.object(ccrelay_center, "verify_from_candidates", return_value={"status": "NOT_APPLICABLE"}),
+            patch.object(ccrelay_center, "sync_relay_artifacts", return_value={"success": True}),
+            patch.object(ccrelay_center, "start_remote_relay", return_value={"success": True}),
+            patch.object(ccrelay_center, "wait_remote_relay_health", return_value={"success": True}),
+            patch.object(ccrelay_center, "wait_center_relay_registration", return_value={
+                "success": False, "summary": "registration timeout",
+            }),
+            patch.object(ccrelay_center, "diagnose_remote_center", return_value={"success": True}),
+            patch.object(ccrelay_center, "diagnose_remote_relay", return_value={"success": True}),
+            patch.object(ccrelay_center, "save_bootstrap_attempt", return_value=Path("C:/attempt.json")),
+            patch.object(ccrelay_center, "stop_remote_center", return_value={"success": True}),
+            patch.object(ccrelay_center, "save_state", return_value=Path("C:/state.json")),
+            patch.object(ccrelay_center.ccrelay_ssh, "save_config"),
+        ]
+        with ExitStack() as stack:
+            for active_patch in patches:
+                stack.enter_context(active_patch)
             result = ccrelay_center.bootstrap(plan, "secret", timeout_seconds=10)
 
         self.assertFalse(result["success"])
