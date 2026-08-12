@@ -13,6 +13,15 @@ import package_skill_release
 
 class ReleasePackageTest(unittest.TestCase):
 
+    def test_gitee_build_makes_gradle_wrapper_executable_before_detecting_it(self):
+        repository = Path(__file__).resolve().parents[1]
+        build_script = (repository / "scripts/gitee_go_build.sh").read_text(encoding="utf-8")
+
+        self.assertLess(
+            build_script.index('chmod +x "$REPO_ROOT/gradlew"'),
+            build_script.index("ensure_gradle_command\n"),
+        )
+
     def test_local_and_github_builds_share_the_same_packager(self):
         repository = Path(__file__).resolve().parents[1]
         powershell_build = (repository / "build.ps1").read_text(encoding="utf-8")

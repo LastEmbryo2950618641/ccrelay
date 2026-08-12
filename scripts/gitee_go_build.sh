@@ -103,11 +103,11 @@ ensure_java() {
 
 install_powershell
 ensure_python
+chmod +x "$REPO_ROOT/gradlew"
 ensure_gradle_command
 ensure_java
 
 cd "$REPO_ROOT"
-chmod +x "$REPO_ROOT/gradlew"
 
 log 'Running Java tests'
 "$GRADLE_CMD" test
