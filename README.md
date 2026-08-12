@@ -45,7 +45,7 @@ CC Relay 是面向所有支持标准 Skill 的 AI 产品的远端多 Agent 协�
 - 本地构建与 GitHub Actions 调用同一个打包器，统一生成 `ccrelay-full.zip` 和 `ccrelay-bootstrap.zip`，并分别生成 SHA-256 文件。
 - `ccrelay-full.zip` 是包含 JAR、Windows/Linux JRE、内置 Python、Claude Code 和全部脚本的完整自包含 Skill。
 - `ccrelay-bootstrap.zip` 是一次性引导 Skill；首次使用时默认从 GitHub 最新 Release 下载并校验完整包，覆盖自身后立即按完整 Skill 继续工作，不承担后续版本检查。
-- 推送 `v*` 标签时会创建或更新对应 GitHub Release，上传两类 ZIP、校验文件和发布清单，并将该成功发布的版本设为 GitHub Latest Release。两个 ZIP 解压后的顶层目录均为 `ccrelay/`。
+- 在 Actions 页面手动选择目标版本分支并运行工作流时，同一次运行会完成测试、打包、按 `build.gradle` 版本更新同名 `v*` 标签、创建或更新 GitHub Release、上传两类 ZIP 及校验文件，并将该版本设为 Latest Release。版本分支和标签推送均不会重复触发发布构建；普通 `main` 推送只执行构建验证。两个 ZIP 解压后的顶层目录均为 `ccrelay/`。
 
 ## 任务观测
 

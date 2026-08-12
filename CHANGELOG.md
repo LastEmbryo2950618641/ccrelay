@@ -23,6 +23,7 @@
 - 本地构建与 GitHub Actions 统一生成完整 Skill ZIP 和一次性 GitHub 下载引导 ZIP；引导包完成覆盖后不再参与运行或要求后续更新。
 - GitHub 标签构建成功后显式将对应版本设为 Latest Release，供固定的 `releases/latest/download` 地址下载。
 - 引导包下载增加有限重试，并在 Windows `curl` 失败后回退 PowerShell 下载器。
+- 合并版本构建与 Release 发布流程，由单次手动 Actions 运行测试、打包、更新版本标签并发布资产。
 
 ## [0.1.0] - 2026-08-11
 
