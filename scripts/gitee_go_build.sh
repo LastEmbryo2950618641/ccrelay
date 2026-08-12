@@ -82,11 +82,16 @@ ensure_python() {
   fail 'Python 3 is required on the Gitee Go runner'
 }
 
-ensure_gradle() {
-  if have gradle; then
+ensure_gradle_command() {
+  if [ -x "$REPO_ROOT/gradlew" ]; then
+    GRADLE_CMD="$REPO_ROOT/gradlew"
     return 0
   fi
-  fail 'Gradle is required on the Gitee Go runner'
+  if have gradle; then
+    GRADLE_CMD=$(command -v gradle)
+    return 0
+  fi
+  fail 'Gradle Wrapper or Gradle is required on the Gitee Go runner'
 }
 
 ensure_java() {
@@ -98,20 +103,21 @@ ensure_java() {
 
 install_powershell
 ensure_python
-ensure_gradle
+ensure_gradle_command
 ensure_java
 
 cd "$REPO_ROOT"
+chmod +x "$REPO_ROOT/gradlew"
 
 log 'Running Java tests'
-gradle test
+"$GRADLE_CMD" test
 
 log 'Running CLI tests'
 "$PYTHON_BIN" scripts/test_ccrelay_cli.py
 "$PYTHON_BIN" scripts/test_release_packages.py
 
 log 'Building boot JAR'
-gradle bootJar
+"$GRADLE_CMD" bootJar
 
 BOOT_JAR=$(ls -1t build/libs/*.jar 2>/dev/null | head -n 1 || true)
 [ -n "$BOOT_JAR" ] || fail 'Boot JAR was not generated'
