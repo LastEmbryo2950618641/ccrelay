@@ -17,13 +17,23 @@ function Download-File {
     param([string]$Url, [string]$Destination)
     $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     if ($curl) {
-        & $curl.Source --fail --location --silent --show-error --output $Destination $Url
-        if ($LASTEXITCODE -ne 0) {
-            throw "Download failed: $Url"
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            & $curl.Source --fail --location --silent --show-error --connect-timeout 20 --output $Destination $Url
+            if ($LASTEXITCODE -eq 0) {
+                return
+            }
+            if ($attempt -lt 3) {
+                Start-Sleep -Seconds (2 * $attempt)
+            }
         }
-        return
     }
-    Invoke-WebRequest -UseBasicParsing $Url -OutFile $Destination
+    Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    try {
+        Invoke-WebRequest -UseBasicParsing $Url -OutFile $Destination
+    } catch {
+        throw "Download failed: $Url. $($_.Exception.Message)"
+    }
 }
 
 try {

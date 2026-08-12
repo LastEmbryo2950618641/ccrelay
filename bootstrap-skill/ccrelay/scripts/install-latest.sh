@@ -20,8 +20,24 @@ command -v curl >/dev/null 2>&1 || { printf '%s\n' 'curl is required to download
 command -v unzip >/dev/null 2>&1 || { printf '%s\n' 'unzip is required to install CC Relay' >&2; exit 1; }
 
 mkdir -p "$EXTRACT_ROOT"
-curl -fsSL "${RELEASE_BASE_URL%/}/ccrelay-full.zip" -o "$ARCHIVE_PATH"
-curl -fsSL "${RELEASE_BASE_URL%/}/ccrelay-full.zip.sha256" -o "$CHECKSUM_PATH"
+download_file() {
+  url=$1
+  destination=$2
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    rm -f "$destination"
+    if curl -fsSL --connect-timeout 20 "$url" -o "$destination"; then
+      return 0
+    fi
+    [ "$attempt" -eq 3 ] || sleep $((attempt * 2))
+    attempt=$((attempt + 1))
+  done
+  printf '%s\n' "Download failed: $url" >&2
+  return 1
+}
+
+download_file "${RELEASE_BASE_URL%/}/ccrelay-full.zip" "$ARCHIVE_PATH"
+download_file "${RELEASE_BASE_URL%/}/ccrelay-full.zip.sha256" "$CHECKSUM_PATH"
 EXPECTED=$(awk 'NR == 1 { print tolower($1) }' "$CHECKSUM_PATH")
 if command -v sha256sum >/dev/null 2>&1; then
   ACTUAL=$(sha256sum "$ARCHIVE_PATH" | awk '{ print tolower($1) }')

@@ -22,6 +22,11 @@ class ReleasePackageTest(unittest.TestCase):
         self.assertIn("scripts/package_skill_release.py", shell_build)
         self.assertIn("run: bash build.sh", workflow)
         self.assertIn('gh release edit "$GITHUB_REF_NAME" --latest', workflow)
+        windows_bootstrap = (repository / "bootstrap-skill/ccrelay/scripts/install-latest.ps1").read_text(encoding="utf-8")
+        shell_bootstrap = (repository / "bootstrap-skill/ccrelay/scripts/install-latest.sh").read_text(encoding="utf-8")
+        self.assertIn("Invoke-WebRequest", windows_bootstrap)
+        self.assertIn("attempt = 1", windows_bootstrap)
+        self.assertIn('attempt=1', shell_bootstrap)
         for archive in ("ccrelay-full.zip", "ccrelay-bootstrap.zip"):
             self.assertIn(archive, powershell_build)
             self.assertIn(archive, shell_build)

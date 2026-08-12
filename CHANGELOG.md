@@ -22,6 +22,7 @@
 - Web UI 会话首次收到用户问题后，由协调 Agent 异步生成并持久化简洁标题；失败时保留节点标题兜底。
 - 本地构建与 GitHub Actions 统一生成完整 Skill ZIP 和一次性 GitHub 下载引导 ZIP；引导包完成覆盖后不再参与运行或要求后续更新。
 - GitHub 标签构建成功后显式将对应版本设为 Latest Release，供固定的 `releases/latest/download` 地址下载。
+- 引导包下载增加有限重试，并在 Windows `curl` 失败后回退 PowerShell 下载器。
 
 ## [0.1.0] - 2026-08-11
 
