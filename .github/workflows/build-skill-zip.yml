@@ -140,17 +140,3 @@ jobs:
             dist/release/release-manifest.json \
             --clobber
           gh release edit "$release_tag" --latest
-
-      - name: Mirror release assets to Gitee
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-        run: |
-          version=$(sed -n "s/^version = '\([^']*\)'.*/\1/p" build.gradle | head -n 1)
-          python scripts/publish_gitee_release.py \
-            --owner nekoneko-acg \
-            --repo ccrelay \
-            --release-dir dist/release \
-            --target-commitish "$GITHUB_REF_NAME" \
-            --tag "v$version" \
-            --name "v$version"

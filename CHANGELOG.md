@@ -24,7 +24,7 @@
 - GitHub 标签构建成功后显式将对应版本设为 Latest Release，供固定的 `releases/latest/download` 地址下载。
 - 引导包下载增加有限重试，并在 Windows `curl` 失败后回退 PowerShell 下载器。
 - 合并版本构建与 Release 发布流程，由单次手动 Actions 运行测试、打包、更新版本标签并发布资产。
-- 同一发布构建将产物镜像到 Gitee，并让一次性引导包优先使用 Gitee、失败时回退 GitHub。
+- 新增 Gitee Go 手动构建发布方案，由 Gitee 侧本地构建完整包，避免 GitHub Runner 跨网直传大文件到 Gitee。
 - 修复 Windows 上通过 SCP 上传运行时制品时反斜杠路径被远端误作完整文件名的问题。
 - 修复 Center 启动失败后 PID 文件未记录的同目录孤儿进程持续占用端口、导致后续覆盖部署失败的问题。
 
