@@ -29,10 +29,15 @@ mkdir -p "$EXTRACT_ROOT"
 download_file() {
   url=$1
   destination=$2
+  display_name=${3:-$(basename "$destination")}
   attempt=1
   while [ "$attempt" -le 3 ]; do
     rm -f "$destination"
-    if curl -fsSL --connect-timeout 20 "$url" -o "$destination"; then
+    printf 'Downloading %s (attempt %d/3)\n' "$display_name" "$attempt"
+    if curl --fail --location --progress-bar --show-error --connect-timeout 20 "$url" -o "$destination"; then
+      bytes=$(wc -c < "$destination" | tr -d ' ')
+      mib=$(awk -v bytes="$bytes" 'BEGIN { printf "%.1f", bytes / 1048576 }')
+      printf 'Downloaded %s: %s MiB\n' "$display_name" "$mib"
       return 0
     fi
     [ "$attempt" -eq 3 ] || sleep $((attempt * 2))
@@ -131,6 +136,7 @@ validate_gitee_volumes() {
 expand_gitee_split_archive() {
   first_volume=$1
   seven_zip=$(seven_zip_command) || return 1
+  printf '%s\n' 'Restoring the complete package from Gitee split volumes' >&2
   rm -rf "$RECOVERY_ROOT"
   mkdir -p "$RECOVERY_ROOT"
   "$seven_zip" x -tSplit -y "-o$RECOVERY_ROOT" "$first_volume" >/dev/null || return 1
@@ -144,6 +150,7 @@ expand_gitee_split_archive() {
 
 expand_gitee_outer_archive() {
   outer_archive=$1
+  printf '%s\n' 'Extracting the restored Gitee package' >&2
   validate_gitee_outer_archive "$outer_archive" || return 1
   inner_root="$RECOVERY_ROOT/inner"
   mkdir -p "$inner_root"
@@ -167,8 +174,9 @@ validate_gitee_outer_archive() {
 
 download_package() {
   base_url=${1%/}
-  if download_file "$base_url/ccrelay-full.zip" "$ARCHIVE_PATH" &&
-     download_file "$base_url/ccrelay-full.zip.sha256" "$CHECKSUM_PATH"; then
+  if download_file "$base_url/ccrelay-full.zip" "$ARCHIVE_PATH" 'ccrelay-full.zip' &&
+     download_file "$base_url/ccrelay-full.zip.sha256" "$CHECKSUM_PATH" 'ccrelay-full.zip.sha256'; then
+    printf '%s\n' 'Verifying CC Relay package SHA-256'
     if verify_package_checksum; then
       printf '%s\n' "CC Relay package source: $base_url"
       return 0
@@ -197,25 +205,29 @@ json_object_id_by_name() {
 
 download_gitee_package() {
   api_base=${GITEE_API_BASE_URL%/}
-  if ! download_file "$api_base/releases/latest" "$GITEE_RELEASE_METADATA"; then
+  if ! download_file "$api_base/releases/latest" "$GITEE_RELEASE_METADATA" 'Gitee release metadata'; then
     clear_downloaded_package
     return 1
   fi
   release_id=$(tr ',' '\n' < "$GITEE_RELEASE_METADATA" |
     awk 'match($0, /"id"[[:space:]]*:[[:space:]]*[0-9]+/) { value=substr($0,RSTART,RLENGTH); sub(/^.*:/,"",value); gsub(/[[:space:]]/,"",value); print value; exit }')
   [ -n "$release_id" ] || { clear_downloaded_package; return 1; }
-  download_file "$api_base/releases/$release_id/attach_files" "$GITEE_ATTACHMENT_METADATA" || { clear_downloaded_package; return 1; }
+  download_file "$api_base/releases/$release_id/attach_files" "$GITEE_ATTACHMENT_METADATA" 'Gitee attachment metadata' || { clear_downloaded_package; return 1; }
   checksum_id=$(json_object_id_by_name 'ccrelay-full.zip.sha256')
   [ -n "$checksum_id" ] || { clear_downloaded_package; return 1; }
   volume_rows=$(gitee_volume_rows)
   validate_gitee_volumes "$volume_rows" || { clear_downloaded_package; return 1; }
   mkdir -p "$VOLUME_ROOT"
+  volume_count=$(printf '%s\n' "$volume_rows" | awk 'NF { count++ } END { print count + 0 }')
+  volume_index=0
   printf '%s\n' "$volume_rows" | while IFS="$(printf '\t')" read -r _number volume_id volume_name; do
-    download_file "$api_base/releases/$release_id/attach_files/$volume_id/download" "$VOLUME_ROOT/$volume_name" || exit 1
+    volume_index=$((volume_index + 1))
+    download_file "$api_base/releases/$release_id/attach_files/$volume_id/download" "$VOLUME_ROOT/$volume_name" "$volume_name [$volume_index/$volume_count]" || exit 1
   done || { clear_downloaded_package; return 1; }
-  download_file "$api_base/releases/$release_id/attach_files/$checksum_id/download" "$CHECKSUM_PATH" || { clear_downloaded_package; return 1; }
+  download_file "$api_base/releases/$release_id/attach_files/$checksum_id/download" "$CHECKSUM_PATH" 'ccrelay-full.zip.sha256' || { clear_downloaded_package; return 1; }
   outer_archive=$(expand_gitee_split_archive "$VOLUME_ROOT/ccrelay-full.zip.001") || { clear_downloaded_package; return 1; }
   expand_gitee_outer_archive "$outer_archive" || { clear_downloaded_package; return 1; }
+  printf '%s\n' 'Verifying CC Relay package SHA-256'
   if verify_package_checksum; then
     printf '%s\n' "CC Relay package source: $api_base/releases/latest"
     return 0
@@ -235,6 +247,7 @@ elif ! download_gitee_package && ! download_package "$GITHUB_RELEASE_BASE_URL"; 
   exit 1
 fi
 
+printf '%s\n' 'Extracting the complete CC Relay Skill'
 unzip -q "$ARCHIVE_PATH" -d "$EXTRACT_ROOT"
 COMPLETE_SKILL="$EXTRACT_ROOT/ccrelay"
 [ -f "$COMPLETE_SKILL/SKILL.md" ] && [ -f "$COMPLETE_SKILL/assets/runtime-bundle/ccrelay/app.jar" ] || {

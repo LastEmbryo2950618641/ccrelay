@@ -17,13 +17,20 @@ $volumeRoot = Join-Path $workRoot 'gitee-volumes'
 $recoveryRoot = Join-Path $workRoot 'gitee-recovered'
 
 function Download-File {
-    param([string]$Url, [string]$Destination)
+    param(
+        [string]$Url,
+        [string]$Destination,
+        [string]$DisplayName = (Split-Path $Destination -Leaf)
+    )
     $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     if ($curl) {
         for ($attempt = 1; $attempt -le 3; $attempt++) {
             Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-            & $curl.Source --fail --location --silent --show-error --connect-timeout 20 --output $Destination $Url
+            Write-Host "Downloading $DisplayName (attempt $attempt/3)"
+            & $curl.Source --fail --location --progress-bar --show-error --connect-timeout 20 --output $Destination $Url
             if ($LASTEXITCODE -eq 0) {
+                $size = (Get-Item -LiteralPath $Destination).Length
+                Write-Host ('Downloaded {0}: {1:N1} MiB' -f $DisplayName, ($size / 1MB))
                 return
             }
             if ($attempt -lt 3) {
@@ -33,7 +40,10 @@ function Download-File {
     }
     Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
     try {
+        Write-Host "Downloading $DisplayName with Invoke-WebRequest"
         Invoke-WebRequest -UseBasicParsing $Url -OutFile $Destination -TimeoutSec 1800
+        $size = (Get-Item -LiteralPath $Destination).Length
+        Write-Host ('Downloaded {0}: {1:N1} MiB' -f $DisplayName, ($size / 1MB))
     } catch {
         throw "Download failed: $Url. $($_.Exception.Message)"
     }
@@ -84,6 +94,7 @@ function Assert-ContinuousVolumes {
 function Expand-GiteeSplitArchive {
     param([string]$FirstVolume)
     $sevenZip = Get-SevenZipCommand
+    Write-Host 'Restoring the complete package from Gitee split volumes'
     Remove-Item -LiteralPath $recoveryRoot -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $recoveryRoot | Out-Null
     & $sevenZip x -tSplit -y "-o$recoveryRoot" $FirstVolume | Out-Host
@@ -99,6 +110,7 @@ function Expand-GiteeSplitArchive {
 
 function Expand-GiteeOuterArchive {
     param([string]$OuterArchive)
+    Write-Host 'Extracting the restored Gitee package'
     $entryName = Get-GiteeOuterArchiveEntry $OuterArchive
     $innerRoot = Join-Path $recoveryRoot 'inner'
     New-Item -ItemType Directory -Force -Path $innerRoot | Out-Null
@@ -129,8 +141,9 @@ function Download-Package {
     param([string]$BaseUrl)
     $downloadBase = $BaseUrl.TrimEnd('/')
     try {
-        Download-File "$downloadBase/ccrelay-full.zip" $archivePath
-        Download-File "$downloadBase/ccrelay-full.zip.sha256" $checksumPath
+        Download-File "$downloadBase/ccrelay-full.zip" $archivePath 'ccrelay-full.zip'
+        Download-File "$downloadBase/ccrelay-full.zip.sha256" $checksumPath 'ccrelay-full.zip.sha256'
+        Write-Host 'Verifying CC Relay package SHA-256'
         Test-PackageChecksum
         Write-Output "CC Relay package source: $downloadBase"
         return $true
@@ -146,12 +159,12 @@ function Download-GiteePackage {
     $releaseMetadata = Join-Path $workRoot 'gitee-release.json'
     $attachmentMetadata = Join-Path $workRoot 'gitee-attachments.json'
     try {
-        Download-File "$apiBase/releases/latest" $releaseMetadata
+        Download-File "$apiBase/releases/latest" $releaseMetadata 'Gitee release metadata'
         $release = Get-Content -Raw $releaseMetadata | ConvertFrom-Json
         if (-not $release.id) {
             throw 'Gitee latest Release does not contain an id'
         }
-        Download-File "$apiBase/releases/$($release.id)/attach_files" $attachmentMetadata
+        Download-File "$apiBase/releases/$($release.id)/attach_files" $attachmentMetadata 'Gitee attachment metadata'
         $attachments = @(Get-Content -Raw $attachmentMetadata | ConvertFrom-Json)
         $checksum = $attachments | Where-Object { $_.name -eq 'ccrelay-full.zip.sha256' } | Select-Object -First 1
         if (-not $checksum.id) {
@@ -164,15 +177,18 @@ function Download-GiteePackage {
         } | Sort-Object Number)
         Assert-ContinuousVolumes $volumes
         New-Item -ItemType Directory -Force -Path $volumeRoot | Out-Null
+        $volumeIndex = 0
         foreach ($volume in $volumes) {
+            $volumeIndex++
             if (-not $volume.Id) {
                 throw "Gitee split asset has no id: $($volume.Name)"
             }
-            Download-File "$apiBase/releases/$($release.id)/attach_files/$($volume.Id)/download" (Join-Path $volumeRoot $volume.Name)
+            Download-File "$apiBase/releases/$($release.id)/attach_files/$($volume.Id)/download" (Join-Path $volumeRoot $volume.Name) "$($volume.Name) [$volumeIndex/$($volumes.Count)]"
         }
-        Download-File "$apiBase/releases/$($release.id)/attach_files/$($checksum.id)/download" $checksumPath
+        Download-File "$apiBase/releases/$($release.id)/attach_files/$($checksum.id)/download" $checksumPath 'ccrelay-full.zip.sha256'
         $outerArchive = Expand-GiteeSplitArchive (Join-Path $volumeRoot 'ccrelay-full.zip.001')
         Expand-GiteeOuterArchive $outerArchive
+        Write-Host 'Verifying CC Relay package SHA-256'
         Test-PackageChecksum
         Write-Output "CC Relay package source: $apiBase/releases/latest"
         return $true
@@ -195,6 +211,7 @@ try {
         throw 'Unable to download and verify the CC Relay complete package from any release source'
     }
 
+    Write-Host 'Extracting the complete CC Relay Skill'
     Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force
     $completeSkill = Join-Path $extractRoot 'ccrelay'
     if (-not (Test-Path (Join-Path $completeSkill 'SKILL.md') -PathType Leaf) -or

@@ -72,6 +72,10 @@ class ReleasePackageTest(unittest.TestCase):
             "-tSplit",
             "7z.exe",
             "7zz.exe",
+            "--progress-bar",
+            "Downloading $DisplayName",
+            "Restoring the complete package from Gitee split volumes",
+            "Verifying CC Relay package SHA-256",
         ):
             self.assertIn(marker, windows)
         self.assertLess(windows.index("Assert-ContinuousVolumes"), windows.index("Expand-GiteeSplitArchive"))
@@ -92,6 +96,10 @@ class ReleasePackageTest(unittest.TestCase):
             "-tSplit",
             "command -v 7z",
             "command -v 7zz",
+            "--progress-bar",
+            "Downloading %s (attempt %d/3)",
+            "Restoring the complete package from Gitee split volumes",
+            "Verifying CC Relay package SHA-256",
         ):
             self.assertIn(marker, shell)
         self.assertLess(shell.index("validate_gitee_volumes"), shell.index("expand_gitee_split_archive"))

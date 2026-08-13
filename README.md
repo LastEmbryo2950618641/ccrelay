@@ -1,5 +1,64 @@
 # CC Relay 技能运行时
 
+## 快速使用指南
+
+### 1. 下载一次性引导包
+
+只需从 Release 下载 `ccrelay-bootstrap.zip`，不需要手动下载完整包或 Gitee 分卷。
+
+- 国内网络优先使用 [Gitee Release](https://gitee.com/nekoneko-acg/ccrelay/releases)
+- 也可以使用 [GitHub Latest Release](https://github.com/LastEmbryo2950618641/ccrelay/releases/latest)
+
+### 2. 在 Codex 或 Claude Code 中安装引导包
+
+将下载好的 `ccrelay-bootstrap.zip` 提供给 Codex 或 Claude Code，然后输入：
+
+```text
+帮我安装 Skill ccrelay-bootstrap.zip
+```
+
+### 3. 使用引导包安装完整 CC Relay
+
+引导 Skill 安装完成后输入：
+
+```text
+/ccrelay 帮我安装完整 CC Relay
+```
+
+随后按照会话中的指引操作。引导 Skill 会优先从 Gitee 下载、恢复并校验完整包；失败时自动回退 GitHub。下载完成后，引导 Skill 会被完整 CC Relay Skill 覆盖。
+
+### 4. 查看节点状态或部署 CC Relay
+
+查看远端机器负载：
+
+```text
+/ccrelay 帮我查看 IP1 与 IP2 机器的负载
+```
+
+将 CC Relay 部署到多个节点：
+
+```text
+/ccrelay 帮我部署到节点 IP1、IP2 与 IP3
+```
+
+首次部署时，按照会话指引完成 SSH 凭据、专用账户和模型配置。
+
+### 5. 使用多 Agent 协作讨论
+
+```text
+/ccrelay 请讨论中美之间的差异，并讨论谁更强
+```
+
+CC Relay 会根据问题选择合适的协作方式，让多个远端 Agent 共同分析并汇总结论。
+
+### 6. 使用多 Agent 协作排查任务
+
+```text
+/ccrelay 请帮我查看 YARN 任务 application_id 为什么失败
+```
+
+请将 `application_id` 替换为实际的 YARN Application ID。远端 Agent 会根据可访问节点上的日志、命令结果和上下文协作定位问题。
+
 CC Relay 是面向所有支持标准 Skill 的 AI 产品的远端多 Agent 协作控制面。
 
 - 单一本地 jar 运行时
@@ -97,4 +156,3 @@ CC Relay 是面向所有支持标准 Skill 的 AI 产品的远端多 Agent 协�
 - `L3_A2A_MOCK`：跨节点 A2A mock 闭环。
 - `L4_REMOTE_AI_WEAK_REACT`：真实模型调用 + 弱约束 ReAct。
 - `L5_JAVA_ENFORCED_REACT`：Java 托管 Runner 强制执行结构化 ReAct 动作、步数、白名单、超时、注入、调参、停止和审计。
-
