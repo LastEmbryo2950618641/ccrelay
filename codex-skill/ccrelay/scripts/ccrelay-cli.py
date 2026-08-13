@@ -2034,7 +2034,12 @@ def ssh_identity_rotate_key(args: argparse.Namespace) -> Any:
 def resolve_identity_mode(args: argparse.Namespace) -> Optional[bool]:
     if args.allow_create is not None:
         return bool(args.allow_create)
-    identity = ccrelay_ssh.load_config().get("clusterIdentity") or {}
+    config = ccrelay_ssh.load_config()
+    identity = config.get("clusterIdentity") or {}
+    threshold = max(1, int(identity.get("fullMeshThreshold", ccrelay_ssh.DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)))
+    target_count = len(getattr(args, "nodes", []) or identity.get("targetNodes") or [])
+    if target_count > threshold:
+        return False
     if bool(identity.get("selectionRequired", False)):
         return None
     if "dedicatedAccountCreationAllowed" in identity:
@@ -2352,6 +2357,7 @@ def identity_policy_summary(config: Dict[str, Any]) -> Dict[str, Any]:
         "configured": not bool(identity.get("selectionRequired", True)),
         "accountMode": identity.get("accountMode", "EXISTING_ACCOUNT"),
         "dedicatedAccountCreationAllowed": bool(identity.get("dedicatedAccountCreationAllowed", False)),
+        "fullMeshThreshold": int(identity.get("fullMeshThreshold", ccrelay_ssh.DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)),
         "dedicatedUsername": dedicated.get("username", ccrelay_identity.DEFAULT_DEDICATED_USERNAME),
         "detailsConfirmed": bool(dedicated.get("detailsConfirmed", False)),
     }

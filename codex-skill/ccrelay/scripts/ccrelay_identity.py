@@ -375,6 +375,7 @@ def local_status(cluster_id: str = DEFAULT_CLUSTER_ID) -> Dict[str, Any]:
         "selectionRequired": bool(identity.get("selectionRequired", False)),
         "accountMode": identity.get("accountMode", "EXISTING_ACCOUNT"),
         "dedicatedAccountCreationAllowed": bool(identity.get("dedicatedAccountCreationAllowed", False)),
+        "fullMeshThreshold": int(identity.get("fullMeshThreshold", ccrelay_ssh.DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)),
         "dedicatedUsername": dedicated.get("username", DEFAULT_DEDICATED_USERNAME),
         "dedicatedAccountStatus": dedicated.get("status", "DISABLED"),
         "detailsConfirmed": bool(dedicated.get("detailsConfirmed", False)),

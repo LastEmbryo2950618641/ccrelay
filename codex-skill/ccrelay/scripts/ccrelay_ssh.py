@@ -28,6 +28,7 @@ DEFAULT_TIMEOUT_SECONDS = 15
 SSH_ARGUMENT_MODE_DEFAULT = "DEFAULT"
 SSH_ARGUMENT_MODE_USER_PROVIDED = "USER_PROVIDED"
 DEFAULT_KEY_NAME = "id_ed25519_ccrelay"
+DEFAULT_CLUSTER_FULL_MESH_THRESHOLD = 8
 REQUIRED_TOOLS = ("ssh", "scp", "ssh-keygen")
 REMOTE_POSIX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -70,6 +71,7 @@ def default_config() -> Dict[str, Any]:
             "selectionRequired": True,
             "accountMode": "EXISTING_ACCOUNT",
             "dedicatedAccountCreationAllowed": False,
+            "fullMeshThreshold": DEFAULT_CLUSTER_FULL_MESH_THRESHOLD,
             "dedicatedAccount": {
                 "username": "ccrelay",
                 "status": "DISABLED",
@@ -106,6 +108,7 @@ def load_config() -> Dict[str, Any]:
     has_identity = isinstance(loaded.get("clusterIdentity"), dict)
     identity = loaded_identity
     config["clusterIdentity"].update(identity)
+    config["clusterIdentity"].setdefault("fullMeshThreshold", DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)
     if not identity.get("targetNodes") and identity.get("managedNodes"):
         config["clusterIdentity"]["targetNodes"] = [
             {
@@ -259,6 +262,7 @@ def masked_config_view() -> Dict[str, Any]:
             "selectionRequired": bool(identity.get("selectionRequired", False)),
             "accountMode": identity.get("accountMode", "EXISTING_ACCOUNT"),
             "dedicatedAccountCreationAllowed": bool(identity.get("dedicatedAccountCreationAllowed", False)),
+            "fullMeshThreshold": int(identity.get("fullMeshThreshold", DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)),
             "dedicatedAccount": {
                 "username": dedicated.get("username", "ccrelay"),
                 "status": dedicated.get("status", "DISABLED"),

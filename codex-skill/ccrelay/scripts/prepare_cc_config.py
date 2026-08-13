@@ -11,6 +11,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"
@@ -63,16 +65,15 @@ def input_capabilities():
 
 
 def secure_terminal_command(arguments):
-    script_dir = Path(__file__).resolve().parent
     if os.name == "nt":
-        wrapper = script_dir / "prepare-cc-config.ps1"
+        wrapper = SCRIPT_DIR / "prepare-cc-config.ps1"
         command = "& " + powershell_quote(wrapper)
         command += " " + " ".join(powershell_quote(item) for item in arguments)
         return (
             'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
             f'"{command}"'
         )
-    wrapper = script_dir / "prepare-cc-config.sh"
+    wrapper = SCRIPT_DIR / "prepare-cc-config.sh"
     rendered = " ".join(shlex.quote(str(item)) for item in arguments)
     return f"bash {shlex.quote(str(wrapper))} {rendered}"
 
@@ -93,9 +94,8 @@ def launch_secure_terminal(arguments):
                 arguments, capabilities, prefer_gui=False
             ),
         }
-    script_dir = Path(__file__).resolve().parent
     if os.name == "nt":
-        wrapper = script_dir / "prepare-cc-config.ps1"
+        wrapper = SCRIPT_DIR / "prepare-cc-config.ps1"
         command = "& " + powershell_quote(wrapper)
         command += " " + " ".join(
             powershell_quote(item) for item in arguments
@@ -113,7 +113,7 @@ def launch_secure_terminal(arguments):
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
     else:
-        wrapper = script_dir / "prepare-cc-config.sh"
+        wrapper = SCRIPT_DIR / "prepare-cc-config.sh"
         command = "bash " + shlex.quote(str(wrapper))
         command += " " + " ".join(shlex.quote(str(item)) for item in arguments)
         launcher = capabilities["secureTerminalLauncher"]

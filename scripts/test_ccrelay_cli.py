@@ -1420,6 +1420,41 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertFalse(output["taskCreated"])
         self.assertFalse(RecordingHandler.records)
 
+
+    def test_resolve_identity_mode_defaults_to_center_only_when_target_count_exceeds_threshold(self):
+        config = {
+            "clusterIdentity": {
+                "selectionRequired": True,
+                "fullMeshThreshold": 4,
+                "targetNodes": [
+                    {"nodeKey": "192.0.2.10:22"},
+                    {"nodeKey": "192.0.2.11:22"},
+                    {"nodeKey": "192.0.2.12:22"},
+                    {"nodeKey": "192.0.2.13:22"},
+                    {"nodeKey": "192.0.2.14:22"},
+                ],
+            }
+        }
+        args = argparse.Namespace(allow_create=None, nodes=[])
+
+        with patch.object(ccrelay_cli.ccrelay_ssh, "load_config", return_value=config):
+            result = ccrelay_cli.resolve_identity_mode(args)
+
+        self.assertFalse(result)
+
+    def test_identity_policy_summary_exposes_full_mesh_threshold(self):
+        summary = ccrelay_cli.identity_policy_summary({
+            "clusterIdentity": {
+                "selectionRequired": True,
+                "accountMode": "EXISTING_ACCOUNT",
+                "dedicatedAccountCreationAllowed": False,
+                "fullMeshThreshold": 12,
+                "dedicatedAccount": {"username": "ccrelay", "detailsConfirmed": False},
+            }
+        })
+
+        self.assertEqual(12, summary["fullMeshThreshold"])
+
     def test_identity_plan_defers_center_selection_until_execution_mode_is_confirmed(self):
         self.seed_default_ssh_credential()
         model_config = Path(self.temporary_directory.name) / "cc-model-config.yml"
