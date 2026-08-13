@@ -312,6 +312,8 @@ SSH 免密: 已验证
 - SSH 参数来源必须可配置。凭据命令使用 `--ssh-arguments-mode DEFAULT|USER_PROVIDED`；默认模式使用兼容 OpenSSH 7.4 的 Skill 参数（包括 `StrictHostKeyChecking=no`），`USER_PROVIDED` 模式只使用用户重复传入的 `--ssh-argument`，不再叠加 Skill 的连接、HostKey、BatchMode 或认证参数，只保留目标端口、地址和必要的密钥传递。若用户已有更严格的 SSH 策略，必须选择用户参数模式并自行提供参数。
 - SSH 多节点引导统一使用 `--concurrency <n>` 控制最大并发，默认 `4`、范围 `1-32`。未显式指定时不得退回逐节点串行；节点探测、账号或公钥安装、Center 到节点验证，以及专用账号 FULL_MESH 信任边验证都受同一上限约束。单节点内部步骤保持顺序，结果按输入顺序展示，单节点失败不得取消其他节点。
 - 用户首次确认部署范围并执行 `bootstrap next --node ...` 时，CLI 必须立即把完整节点集合持久化为 `targetNodes`，即使 SSH 凭据尚未配置。后续 `ssh identity plan|select|apply|verify|rotate-key` 与 `center plan|bootstrap` 默认复用完整 active 目标集合；再次只传部分 `--node` 不得缩小集群。失败节点保留在目标集合并记录为 `failedNodes`；只有用户显式执行 `ssh identity targets exclude --node ... --confirm true` 才能移除。
+- 账号创建、密钥安装、互信验证或 Relay 资源包部署出现部分失败时，必须等待同批其他节点完成当前阶段，再按节点汇总失败阶段、失败类型和可理解摘要。不得自动治理、自动重试或自动排除；统一返回 `PARTIAL_FAILURE_REQUIRES_DECISION`，只允许用户选择“根据失败原因处理失败节点”“放弃失败节点，仅使用成功节点”或“取消”。
+- 用户选择治理时，只处理失败节点并在完成后重新验收完整 active 节点集合；用户选择放弃时，必须先列出待排除节点并取得确认，再执行 `ssh identity targets exclude --node ... --confirm true`。排除不删除远端已创建账号或残余文件，剩余 active 节点必须重新通过身份、互信、Relay 注册和健康验收后才能标记 `SSH_READY` 或 `DEPLOYED`。
 - `FULL_MESH` 必须相对于完整 active 目标集合验收：全部目标节点已验证，且 N 个专用账号节点必须存在并通过 `N * (N - 1)` 条有向互信边。`trustEdges=[]` 只对真实单节点目标集合有效；不得根据一次单节点 `apply/verify` 推断多节点集群已完成。
 - 凭据验证必须使用只读探测；`ssh test --bootstrap-key false` 即使配置允许后续免密，也不得写入 `authorized_keys`，成功时返回 `CREDENTIAL_VALID` 且不提示提前初始化免密。只有显式进入免密初始化或部署预检时才能安装公钥。
 - 允许创建时，专用账号默认名为 `ccrelay`，密码由 Skill 随机生成并只保存受保护引用；共享集群密钥用于节点间免密，只有完整互信验证通过才允许直接自复制。

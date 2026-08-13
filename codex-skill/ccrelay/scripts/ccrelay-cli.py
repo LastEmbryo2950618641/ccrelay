@@ -1418,11 +1418,59 @@ def _process_alive(pid: int) -> bool:
 def task_observe(args: argparse.Namespace) -> Any:
     query = observation_query(args)
     if query.get("taskIds") or query.get("parentTaskId"):
-        return request_json(args, "GET", "/api/skill/observations/tasks", query=query)
+        result = request_json(args, "GET", "/api/skill/observations/tasks", query=query)
+        return deployment_observation_decision(result)
     task_id = query.pop("taskId", None)
     if not task_id:
         raise CliError("taskId is required for single observation")
     return request_json(args, "GET", f"/api/skill/observations/tasks/{quote_path(task_id)}", query=query)
+
+
+def deployment_observation_decision(result: Any) -> Any:
+    if not isinstance(result, dict) or not isinstance(result.get("observations"), list):
+        return result
+    observations = result.get("observations") or []
+    deployment_observations = [
+        item for item in observations
+        if isinstance(item, dict)
+        and isinstance(item.get("task"), dict)
+        and str(item["task"].get("taskType") or "").upper() == "DEPLOY_RELAY"
+    ]
+    if not deployment_observations:
+        return result
+    terminal_statuses = {"SUCCESS", "FAILED", "CANCELLED", "TIMEOUT"}
+    if any(
+            str(item.get("status") or "").upper() not in terminal_statuses
+            for item in deployment_observations):
+        return result
+    failures = []
+    for observation in deployment_observations:
+        status = str(observation.get("status") or "").upper()
+        if status == "SUCCESS":
+            continue
+        task = observation.get("task") if isinstance(observation.get("task"), dict) else {}
+        task_result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        failures.append({
+            "nodeKey": observation.get("targetNodeId") or task.get("targetNodeId") or observation.get("taskId"),
+            "taskId": observation.get("taskId"),
+            "failureStage": observation.get("currentStage") or task.get("currentStage") or "RELAY_DEPLOYMENT",
+            "failureType": observation.get("errorCode") or task.get("errorCode")
+            or task_result.get("failureType") or task_result.get("errorCode") or status,
+            "summary": observation.get("errorMessage") or task.get("errorMessage")
+            or task_result.get("summary") or task_result.get("stderrSummary") or "Relay 部署未完成",
+            "retryable": bool(task_result.get("retryable", status != "CANCELLED")),
+        })
+    if not failures:
+        return result
+    decision = partial_failure_interaction(
+        failures,
+        len(deployment_observations),
+        sum(1 for item in deployment_observations
+            if str(item.get("status") or "").upper() == "SUCCESS"),
+        "RELAY_DEPLOYMENT",
+    )
+    decision["observation"] = result
+    return decision
 
 
 def agent_observe(args: argparse.Namespace) -> Any:
@@ -1715,6 +1763,71 @@ def identity_capability_is_ready(state: Dict[str, Any]) -> bool:
     return capability in {"CENTER_ONLY", "FULL_MESH"}
 
 
+def failure_governance_hint(failure_type: Any, failure_stage: Any) -> str:
+    text = f"{failure_type or ''} {failure_stage or ''}".upper()
+    if "AUTH" in text or "CREDENTIAL" in text:
+        return "为该节点配置可用的独立 SSH 凭据后重新验证"
+    if "PERMISSION" in text or "ACCOUNT" in text or "SUDO" in text:
+        return "提供具备所需权限的节点级账号，或修正远端账号策略后重新执行"
+    if "DISK" in text or "SPACE" in text:
+        return "释放或扩容远端磁盘空间后重新部署该节点"
+    if "NETWORK" in text or "TIMEOUT" in text or "UNREACHABLE" in text:
+        return "恢复节点网络、SSH 端口或防火墙连通性后重新验证"
+    if "TOOL" in text or "COMMAND" in text:
+        return "补齐远端缺失的基础命令后重新执行"
+    if "TRANSFER" in text or "ARTIFACT" in text or "PACKAGE" in text:
+        return "检查远端目录权限、磁盘空间和传输链路后重新部署该节点"
+    if "REGISTER" in text or "HEALTH" in text or "START" in text:
+        return "检查 Relay 启动日志、端口和 Center 可达性后重新验收该节点"
+    return "查看该节点错误详情，修正原因后仅重新执行失败步骤"
+
+
+def partial_failure_interaction(failures: List[Dict[str, Any]], total_count: int,
+                                success_count: int, scope: str) -> Dict[str, Any]:
+    normalized = []
+    for failure in failures:
+        item = dict(failure)
+        item.setdefault("nodeKey", item.get("targetNodeId") or item.get("node") or "unknown")
+        item.setdefault("failureStage", "UNKNOWN")
+        item.setdefault("failureType", "UNKNOWN_FAILURE")
+        item.setdefault("summary", "当前步骤未完成")
+        item["governanceHint"] = failure_governance_hint(
+            item.get("failureType"), item.get("failureStage"))
+        normalized.append(item)
+    failed_nodes = list(dict.fromkeys(str(item["nodeKey"]) for item in normalized))
+    return identity_interaction_payload({
+        "status": "PARTIAL_FAILURE_REQUIRES_DECISION",
+        "stage": "PARTIAL_FAILURE_REQUIRES_DECISION",
+        "failureType": "PARTIAL_FAILURE_REQUIRES_DECISION",
+        "taskCreated": False,
+        "prompt": "部分节点未完成当前步骤。请选择后续处理方式：",
+        "options": [
+            {"id": "GOVERN_FAILED_NODES", "label": "根据失败原因处理失败节点（推荐）", "recommended": True},
+            {"id": "EXCLUDE_FAILED_NODES", "label": "放弃失败节点，仅使用成功节点", "recommended": False,
+             "command": "<CLI> ssh identity targets exclude --node <host:port> --confirm true"},
+            {"id": "CANCEL", "label": "取消", "recommended": False},
+        ],
+        "fields": [],
+        "scope": scope,
+        "totalNodeCount": total_count,
+        "successNodeCount": success_count,
+        "failedNodeCount": len(failed_nodes),
+        "failedNodes": failed_nodes,
+        "failureReport": normalized,
+        "resume": "选择治理时只处理失败节点并重新验收完整 active 节点集合；选择放弃时必须显式排除失败节点，再重新验收剩余节点。",
+    })
+
+
+def identity_failure_decision(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    failures = ccrelay_identity.identity_failure_records(state)
+    if not failures and identity_capability_is_ready(state):
+        return None
+    total_count = int(state.get("targetNodeCount") or len(state.get("nodes") or []))
+    failed_nodes = {item.get("nodeKey") for item in failures}
+    success_count = max(0, total_count - len(failed_nodes))
+    return partial_failure_interaction(failures, total_count, success_count, "SSH_IDENTITY")
+
+
 def ssh_identity_plan(args: argparse.Namespace) -> Any:
     resolve_identity_target_args(args, initialize=True)
     config = ccrelay_ssh.load_config()
@@ -1794,6 +1907,12 @@ def ssh_identity_apply(args: argparse.Namespace) -> Any:
     result["bootstrapExecutionMode"] = execution_mode
     if result.get("effectiveCapability"):
         result["persistence"] = persist_identity_state(args, result, "APPLY")
+        decision = identity_failure_decision(result)
+        if decision is not None:
+            decision["identityResult"] = result
+            decision["bootstrapExecutionMode"] = execution_mode
+            return decision
+    if result.get("effectiveCapability"):
         result["nextStage"] = {
             "stage": "CENTER_BOOTSTRAP_REQUIRED",
             "executionMode": execution_mode,
@@ -1830,6 +1949,10 @@ def ssh_identity_verify(args: argparse.Namespace) -> Any:
     )
     ccrelay_identity.persist_identity_outcome(result)
     result["persistence"] = persist_identity_state(args, result, "VERIFY")
+    decision = identity_failure_decision(result)
+    if decision is not None:
+        decision["identityResult"] = result
+        return decision
     if identity_capability_is_ready(result):
         result["bootstrapStage"] = ccrelay_bootstrap.set_stage(
             args.cluster_id, ccrelay_bootstrap.SSH_READY)["stage"]
@@ -1932,6 +2055,26 @@ def identity_interaction_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def render_identity_interaction(payload: Dict[str, Any]) -> str:
     stage = payload.get("stage")
+    if stage == "PARTIAL_FAILURE_REQUIRES_DECISION":
+        lines = [
+            "部分节点未完成当前步骤。",
+            "",
+            f"成功节点: {payload.get('successNodeCount', 0)}/{payload.get('totalNodeCount', 0)}",
+            f"失败节点: {payload.get('failedNodeCount', 0)}/{payload.get('totalNodeCount', 0)}",
+            "",
+        ]
+        for failure in payload.get("failureReport") or []:
+            lines.extend([
+                f"- {failure.get('nodeKey') or 'unknown'}",
+                f"  阶段: {failure.get('failureStage') or 'UNKNOWN'}",
+                f"  原因: {failure.get('summary') or failure.get('failureType') or '当前步骤未完成'}",
+                f"  建议: {failure.get('governanceHint') or '修正原因后重新执行失败步骤'}",
+            ])
+        lines.extend(["", "请选择：", ""])
+        for index, option in enumerate(payload.get("options") or [], start=1):
+            lines.append(f"{index}. {option.get('label')}")
+        lines.extend(["", "请回复选项序号。"])
+        return "\n".join(lines)
     if stage == "DEDICATED_ACCOUNT_DETAILS_CONFIRMATION":
         summary = payload.get("summary") or {}
         lines = [

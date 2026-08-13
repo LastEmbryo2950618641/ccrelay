@@ -218,6 +218,8 @@ AI 决策规则：`FULL_MESH` 才能考虑节点间 SSH 自复制；`CENTER_ONLY
 
 首次 `bootstrap next` 会把用户确认的完整部署范围写入本地 `targetNodes`。后续身份和中心规划命令都以 active `targetNodes` 为准，当前命令只传部分节点不能缩小范围。认证失败节点优先配置独立凭据；网络不可达节点可重试或保留为失败，只有用户明确确认后才使用 `ssh identity targets exclude --node <host:port> --confirm true` 排除。
 
+账号创建、密钥安装、互信验证和 Relay 资源包部署均采用“同批执行完成后统一决策”：单节点失败不取消其他节点，但同批存在失败时不得进入下一阶段。CLI 返回 `PARTIAL_FAILURE_REQUIRES_DECISION`，逐节点给出失败阶段、失败类型、摘要和治理提示；Skill 只能让用户选择按原因治理、明确排除失败节点或取消，不得自行重试、修复或缩小节点范围。治理或排除后必须重新验收当前完整 active 节点集合。
+
 验收 `FULL_MESH` 时必须核对目标节点数和有向信任边数：N 个节点需要 `N * (N - 1)` 条 READY 边。多节点目标集合出现 `trustEdges=[]` 必须判定为未完成，不能解释为无需节点间互信。
 
 #### 交互要求

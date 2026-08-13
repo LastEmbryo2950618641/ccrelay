@@ -262,11 +262,14 @@ def persist_identity_outcome(state: Dict[str, Any]) -> None:
     failed = []
     allow_create = bool(state.get("dedicatedAccountCreationAllowed"))
     by_key = {item.get("nodeKey"): item for item in state.get("nodes") or []}
+    failures_by_node: Dict[str, Dict[str, Any]] = {}
+    for failure in identity_failure_records(state):
+        failures_by_node.setdefault(str(failure.get("nodeKey") or ""), failure)
     for key, target in active.items():
         item = by_key.get(key) or {}
         ready = item.get("centerAccessStatus") == "READY"
         if allow_create:
-            ready = ready and item.get("accountStatus") == "ACTIVE"
+            ready = ready and item.get("accountStatus") == "ACTIVE" and key not in failures_by_node
         if ready:
             successful.append({
                 **target,
@@ -275,14 +278,92 @@ def persist_identity_outcome(state: Dict[str, Any]) -> None:
                 "osType": item.get("osType"),
             })
         else:
+            failure = failures_by_node.get(key) or {}
             failed.append({
                 **target,
-                "failureType": item.get("lastErrorCode") or "IDENTITY_NOT_READY",
-                "summary": item.get("lastErrorSummary") or "节点身份或互信尚未验证完成",
+                "failureType": failure.get("failureType") or "IDENTITY_NOT_READY",
+                "failureStage": failure.get("failureStage") or "IDENTITY_VERIFICATION",
+                "summary": failure.get("summary") or "节点身份或互信尚未验证完成",
             })
     identity["managedNodes"] = successful
     identity["failedNodes"] = failed
     ccrelay_ssh.save_config(config)
+
+
+def identity_failure_records(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    records: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+
+    def add(node_key: Any, stage: str, failure_type: Any, summary: Any,
+            related_node: Optional[str] = None) -> None:
+        normalized_node = str(node_key or "").strip()
+        if not normalized_node:
+            return
+        normalized_type = str(failure_type or "IDENTITY_NOT_READY").strip()
+        key = (normalized_node, stage, str(related_node or ""))
+        records[key] = {
+            "nodeKey": normalized_node,
+            "failureStage": stage,
+            "failureType": normalized_type,
+            "summary": str(summary or "节点身份或互信尚未验证完成"),
+            "retryable": normalized_type not in {"DEDICATED_ACCOUNT_CONFLICT", "CANCELLED"},
+            **({"relatedNodeKey": related_node} if related_node else {}),
+        }
+
+    for item in state.get("nodes") or []:
+        if not isinstance(item, dict):
+            continue
+        node_key = item.get("nodeKey")
+        apply_result = item.get("applyResult") if isinstance(item.get("applyResult"), dict) else {}
+        if item.get("accountStatus") == "FAILED":
+            add(
+                node_key,
+                "DEDICATED_ACCOUNT_PROVISION",
+                apply_result.get("failureType") or apply_result.get("status")
+                or item.get("lastErrorCode") or "DEDICATED_ACCOUNT_PROVISION_FAILED",
+                item.get("lastErrorSummary") or apply_result.get("summary"),
+            )
+        if item.get("keyInstallStatus") == "FAILED":
+            add(
+                node_key,
+                "SSH_KEY_INSTALL",
+                apply_result.get("failureType") or apply_result.get("status")
+                or item.get("lastErrorCode") or "SSH_KEY_INSTALL_FAILED",
+                item.get("lastErrorSummary") or apply_result.get("summary"),
+            )
+        if item.get("centerAccessStatus") != "READY":
+            center_probe = item.get("centerProbe") if isinstance(item.get("centerProbe"), dict) else {}
+            add(
+                node_key,
+                "CENTER_TO_NODE_VERIFY",
+                center_probe.get("failureType") or center_probe.get("status")
+                or item.get("lastErrorCode") or "CENTER_ACCESS_FAILED",
+                center_probe.get("summary") or item.get("lastErrorSummary"),
+            )
+
+    for edge in state.get("trustEdges") or []:
+        if not isinstance(edge, dict) or edge.get("status") == "READY":
+            continue
+        source = str(edge.get("sourceNodeKey") or "").strip()
+        target = str(edge.get("targetNodeKey") or "").strip()
+        summary = edge.get("lastErrorSummary") or "节点间 SSH 互信验证失败"
+        failure_type = edge.get("lastErrorCode") or "NODE_TRUST_VERIFY_FAILED"
+        add(source, "NODE_TO_NODE_VERIFY", failure_type, summary, target or None)
+        add(target, "NODE_TO_NODE_VERIFY", failure_type, summary, source or None)
+
+    if (state.get("dedicatedAccountCreationAllowed")
+            and state.get("effectiveCapability") != "FULL_MESH"
+            and state.get("nodeToNodeStatus") != "READY"
+            and not records):
+        for item in state.get("nodes") or []:
+            if isinstance(item, dict):
+                add(
+                    item.get("nodeKey"),
+                    "NODE_TO_NODE_VERIFY",
+                    "NODE_TRUST_INCOMPLETE",
+                    "节点间 SSH 互信尚未完整验证",
+                )
+
+    return list(records.values())
 
 
 def local_status(cluster_id: str = DEFAULT_CLUSTER_ID) -> Dict[str, Any]:

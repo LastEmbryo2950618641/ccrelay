@@ -828,6 +828,58 @@ class CcRelayCliTest(unittest.TestCase):
             "effectiveCapability": "FULL_MESH",
         }))
 
+    def test_identity_partial_failure_requires_user_decision(self):
+        state = {
+            "dedicatedAccountCreationAllowed": True,
+            "effectiveCapability": "DEGRADED",
+            "targetNodeCount": 2,
+            "nodes": [
+                {"nodeKey": "192.0.2.10:22", "accountStatus": "ACTIVE", "centerAccessStatus": "READY"},
+                {"nodeKey": "192.0.2.11:22", "accountStatus": "FAILED", "centerAccessStatus": "FAILED",
+                 "lastErrorSummary": "sudo permission denied",
+                 "applyResult": {"success": False, "failureType": "PERMISSION_DENIED"}},
+            ],
+            "trustEdges": [],
+        }
+
+        decision = ccrelay_cli.identity_failure_decision(state)
+
+        self.assertEqual("PARTIAL_FAILURE_REQUIRES_DECISION", decision["status"])
+        self.assertEqual(1, decision["failedNodeCount"])
+        self.assertIn("根据失败原因处理失败节点", decision["verbatimResponse"])
+        self.assertIn("放弃失败节点", decision["verbatimResponse"])
+        self.assertEqual("PERMISSION_DENIED", decision["failureReport"][0]["failureType"])
+
+    def test_identity_failed_trust_edge_marks_both_nodes_failed(self):
+        with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}):
+            config = ccrelay_ssh.load_config()
+            config["clusterIdentity"]["targetNodes"] = [
+                {"host": "192.0.2.10", "port": 22, "nodeKey": "192.0.2.10:22"},
+                {"host": "192.0.2.11", "port": 22, "nodeKey": "192.0.2.11:22"},
+            ]
+            ccrelay_ssh.save_config(config)
+            state = {
+                "dedicatedAccountCreationAllowed": True,
+                "nodes": [
+                    {"nodeKey": "192.0.2.10:22", "accountStatus": "ACTIVE", "centerAccessStatus": "READY"},
+                    {"nodeKey": "192.0.2.11:22", "accountStatus": "ACTIVE", "centerAccessStatus": "READY"},
+                ],
+                "trustEdges": [{
+                    "sourceNodeKey": "192.0.2.10:22",
+                    "targetNodeKey": "192.0.2.11:22",
+                    "status": "FAILED",
+                    "lastErrorSummary": "trust denied",
+                }],
+            }
+            ccrelay_identity.persist_identity_outcome(state)
+            persisted = ccrelay_identity.target_status()
+
+        self.assertEqual(2, persisted["failedNodeCount"])
+        self.assertEqual(
+            {"192.0.2.10:22", "192.0.2.11:22"},
+            {item["nodeKey"] for item in persisted["failedNodes"]},
+        )
+
     def test_identity_account_mode_uses_human_template(self):
         interaction = ccrelay_cli.identity_mode_interaction({})
 
@@ -3278,6 +3330,39 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertEqual(["parent-1"], query["parentTaskId"])
         self.assertEqual(2, output["summary"]["total"])
         self.assertEqual("parent-1", output["parentTaskId"])
+
+    def test_deployment_observation_partial_failure_requires_user_decision(self):
+        observation = {
+            "parentTaskId": "parent-1",
+            "observations": [
+                {"taskId": "task-a", "targetNodeId": "node-a:18091", "status": "SUCCESS",
+                 "task": {"taskType": "DEPLOY_RELAY"}},
+                {"taskId": "task-b", "targetNodeId": "node-b:18091", "status": "FAILED",
+                 "currentStage": "ARTIFACT_TRANSFER",
+                 "task": {"taskType": "DEPLOY_RELAY", "errorCode": "DISK_SPACE_INSUFFICIENT",
+                          "errorMessage": "no space left"}},
+            ],
+            "summary": {"total": 2, "success": 1, "failed": 1},
+        }
+
+        decision = ccrelay_cli.deployment_observation_decision(observation)
+
+        self.assertEqual("PARTIAL_FAILURE_REQUIRES_DECISION", decision["status"])
+        self.assertEqual("node-b:18091", decision["failedNodes"][0])
+        self.assertEqual("ARTIFACT_TRANSFER", decision["failureReport"][0]["failureStage"])
+        self.assertIn("磁盘", decision["failureReport"][0]["governanceHint"])
+
+    def test_deployment_observation_waits_for_all_nodes_to_finish(self):
+        observation = {
+            "observations": [
+                {"taskId": "task-a", "targetNodeId": "node-a:18091", "status": "RUNNING",
+                 "task": {"taskType": "DEPLOY_RELAY"}},
+                {"taskId": "task-b", "targetNodeId": "node-b:18091", "status": "FAILED",
+                 "task": {"taskType": "DEPLOY_RELAY"}},
+            ],
+        }
+
+        self.assertIs(observation, ccrelay_cli.deployment_observation_decision(observation))
 
     def test_config_commands_cover_plain_and_secret_paths(self):
         plain = self.run_cli(
