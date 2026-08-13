@@ -285,7 +285,12 @@ def resolve_credential(host: str, port: int = DEFAULT_SSH_PORT) -> Tuple[Optiona
     return None, None
 
 
-def read_password_input(password_file: Optional[str], password_env: Optional[str], prompt: str) -> str:
+def read_password_input(
+    password_file: Optional[str],
+    password_env: Optional[str],
+    prompt: str,
+    prompt_password: bool = False,
+) -> str:
     if password_file:
         try:
             value = Path(password_file).read_text(encoding="utf-8").rstrip("\r\n")
@@ -294,6 +299,14 @@ def read_password_input(password_file: Optional[str], password_env: Optional[str
         return require_text(value, "password")
     if password_env:
         return require_text(os.getenv(password_env), f"environment variable {password_env}")
+    if not prompt_password:
+        interactive_tty = bool(sys.stdin.isatty())
+        raise SshCredentialInputRequired({
+            "prompt": "当前命令未明确进入安全密码输入模式。请选择安全终端输入，或明确承担明文输入风险。",
+            "reason": "EXPLICIT_SECURE_INPUT_REQUIRED" if interactive_tty else "NO_INTERACTIVE_TTY",
+            "inputCapabilities": input_capabilities(),
+            "fields": [field("password", "SSH 密码", True, None, "仅在安全终端中输入时不回显", secret=True)],
+        })
     if not sys.stdin.isatty():
         raise SshCredentialInputRequired({
             "prompt": "当前进程没有可用于隐藏输入的交互终端。请选择安全终端输入，或明确承担明文输入风险。",
@@ -321,17 +334,26 @@ def input_capabilities() -> Dict[str, Any]:
 
 def detect_gui_terminal_launcher() -> Optional[str]:
     if os.name == "nt":
-        if os.getenv("WT_SESSION"):
-            return "wt"
-        if os.getenv("ConEmuANSI") or os.getenv("TERM_PROGRAM"):
-            return os.getenv("TERM_PROGRAM") or "conhost"
-        return "wt" if shutil.which("wt") else None
+        return "powershell.exe" if windows_interactive_desktop_available() else None
     if not (os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY")):
         return None
     for candidate in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
         if shutil.which(candidate):
             return candidate
     return None
+
+
+def windows_interactive_desktop_available() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        desktop = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100)
+        if not desktop:
+            return False
+        ctypes.windll.user32.CloseDesktop(desktop)
+        return True
+    except Exception:
+        return False
 
 
 def secure_terminal_command(command_args: List[str]) -> str:
@@ -343,6 +365,47 @@ def secure_terminal_command(command_args: List[str]) -> str:
     wrapper = script_dir / "ccrelay-cli.sh"
     rendered = " ".join(shlex.quote(argument) for argument in command_args)
     return f"bash {shlex.quote(str(wrapper))} {rendered}"
+
+
+def launch_secure_terminal(command_args: List[str]) -> Dict[str, Any]:
+    capabilities = input_capabilities()
+    if not capabilities["guiTerminalLauncherDetected"]:
+        return {
+            "status": "NEED_USER_INPUT",
+            "failureType": "SSH_SECURE_TERMINAL_UNAVAILABLE",
+            "reason": "GUI_TERMINAL_NOT_DETECTED",
+            "inputCapabilities": capabilities,
+            "command": secure_terminal_command(command_args + ["--prompt-password"]),
+        }
+    arguments = command_args + ["--prompt-password"]
+    if os.name == "nt":
+        command = secure_terminal_command(arguments)
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-NoExit",
+                "-Command",
+                command,
+            ],
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+    else:
+        command = secure_terminal_command(arguments)
+        launcher = capabilities["guiTerminalLauncher"]
+        if launcher == "gnome-terminal":
+            launch_arguments = [launcher, "--", "bash", "-lc", command]
+        else:
+            launch_arguments = [launcher, "-e", "bash", "-lc", command]
+        subprocess.Popen(launch_arguments)
+    return {
+        "status": "SECURE_TERMINAL_LAUNCHED",
+        "inputCapabilities": capabilities,
+        "command": secure_terminal_command(arguments),
+        "resume": "安全终端完成后回到当前会话，重新执行原操作；不要回传 SSH 密码。",
+    }
 
 
 def _quote_windows(value: str) -> str:
@@ -366,7 +429,7 @@ def credential_input_interaction(command_args: List[str], scope: str, host: Opti
                 "applicability": "高风险环境且有桌面 GUI；用户确认后才拉起终端。",
                 "available": capabilities["guiTerminalLauncherDetected"],
                 "action": "LAUNCH_COMMAND_IN_TERMINAL",
-                "command": secure_terminal_command(command_args),
+                "command": secure_terminal_command(command_args + ["--launch-secure-terminal"]),
                 "security": "密码只在终端隐藏输入，输入完成后由本地配置加密保存。",
                 "resume": "命令成功后回到当前会话，重新执行原操作；不要在对话中回传密码。",
             },
@@ -376,7 +439,7 @@ def credential_input_interaction(command_args: List[str], scope: str, host: Opti
                 "recommended": False,
                 "applicability": "高风险环境且无桌面 GUI、只有终端；用户确认后自行执行返回命令。",
                 "available": True,
-                "command": secure_terminal_command(command_args),
+                "command": secure_terminal_command(command_args + ["--prompt-password"]),
                 "security": "密码只在用户终端隐藏输入，不进入当前会话。",
                 "resume": "用户执行成功后回到当前会话，重新执行原操作；不要在对话中回传密码。",
             },
@@ -1344,7 +1407,29 @@ def unprotect_secret(value: str) -> str:
 
 
 def random_secret() -> str:
-    return secrets.token_urlsafe(43)
+    groups = (
+        "ABCDEFGHJKLMNPQRSTUVWXYZ",
+        "abcdefghijkmnopqrstuvwxyz",
+        "23456789",
+        "!@#%+=_-",
+    )
+    characters = [secrets.choice(group) for group in groups]
+    alphabet = "".join(groups)
+    characters.extend(secrets.choice(alphabet) for _ in range(28))
+    secrets.SystemRandom().shuffle(characters)
+    return "".join(characters)
+
+
+def secret_meets_complexity_policy(value: str) -> bool:
+    secret = str(value or "")
+    return (
+        len(secret) >= 24
+        and any(character.isupper() for character in secret)
+        and any(character.islower() for character in secret)
+        and any(character.isdigit() for character in secret)
+        and any(character in "!@#%+=_-" for character in secret)
+        and not any(character in ":'\"\\" or character.isspace() for character in secret)
+    )
 
 
 def _summary(value: Any, limit: int = 600) -> str:

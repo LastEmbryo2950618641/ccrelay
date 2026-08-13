@@ -66,10 +66,11 @@ def secure_terminal_command(arguments):
     script_dir = Path(__file__).resolve().parent
     if os.name == "nt":
         wrapper = script_dir / "prepare-cc-config.ps1"
-        rendered = subprocess.list2cmdline([str(item) for item in arguments])
+        command = "& " + powershell_quote(wrapper)
+        command += " " + " ".join(powershell_quote(item) for item in arguments)
         return (
-            f'powershell -NoProfile -ExecutionPolicy Bypass -File '
-            f'{subprocess.list2cmdline([str(wrapper)])} {rendered}'
+            'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+            f'"{command}"'
         )
     wrapper = script_dir / "prepare-cc-config.sh"
     rendered = " ".join(shlex.quote(str(item)) for item in arguments)

@@ -871,6 +871,8 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertIn("无桌面 GUI", secure["applicability"])
         self.assertIn("ccrelay-cli", secure["command"])
         self.assertIn("set-default", secure["command"])
+        self.assertIn("--launch-secure-terminal", launch["command"])
+        self.assertIn("--prompt-password", secure["command"])
         self.assertTrue(manual["securityWarning"])
         self.assertEqual([], output["fields"])
         self.assertIn("3. 明文输入", output["verbatimResponse"])
@@ -887,6 +889,54 @@ class CcRelayCliTest(unittest.TestCase):
         interaction = raised.exception.interaction
         self.assertEqual("NO_INTERACTIVE_TTY", interaction["reason"])
         self.assertIn("manualVisibleFallbackAvailable", interaction["inputCapabilities"])
+
+    @patch.object(ccrelay_ssh.getpass, "getpass")
+    @patch.object(ccrelay_ssh.sys.stdin, "isatty", return_value=True)
+    def test_password_reader_does_not_block_on_implicit_tool_tty(self, _isatty, getpass):
+        with self.assertRaises(ccrelay_ssh.SshCredentialInputRequired):
+            ccrelay_ssh.read_password_input(None, None, "密码: ")
+
+        getpass.assert_not_called()
+
+    @patch.object(ccrelay_ssh.getpass, "getpass", return_value="secret-password")
+    @patch.object(ccrelay_ssh.sys.stdin, "isatty", return_value=True)
+    def test_password_reader_prompts_only_when_explicitly_requested(self, _isatty, getpass):
+        password = ccrelay_ssh.read_password_input(None, None, "密码: ", prompt_password=True)
+
+        self.assertEqual("secret-password", password)
+        getpass.assert_called_once_with("密码: ")
+
+    @unittest.skipUnless(os.name == "nt", "Windows secure terminal launcher test")
+    @patch.object(ccrelay_ssh.subprocess, "Popen")
+    @patch.object(ccrelay_ssh, "input_capabilities", return_value={
+        "platform": "WINDOWS",
+        "currentProcessTty": True,
+        "secureHiddenInput": False,
+        "guiTerminalLauncherDetected": True,
+        "guiTerminalLauncher": "powershell.exe",
+        "manualVisibleFallbackAvailable": True,
+        "passwordFileAvailable": True,
+        "passwordEnvironmentAvailable": True,
+    })
+    def test_ssh_password_can_launch_independent_secure_terminal(self, _capabilities, popen):
+        response = ccrelay_ssh.launch_secure_terminal([
+            "ssh", "config", "set-default", "--username", "tester", "--port", "22",
+        ])
+
+        self.assertEqual("SECURE_TERMINAL_LAUNCHED", response["status"])
+        launch_args = popen.call_args.args[0]
+        self.assertIn("powershell.exe", launch_args)
+        self.assertIn("--prompt-password", launch_args[-1])
+        self.assertEqual(
+            getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            popen.call_args.kwargs["creationflags"],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows desktop detection test")
+    @patch.object(ccrelay_ssh, "windows_interactive_desktop_available", return_value=True)
+    @patch.object(ccrelay_ssh.shutil, "which", return_value=None)
+    def test_windows_secure_terminal_does_not_require_wt(self, _which, _desktop):
+        self.assertEqual("powershell.exe", ccrelay_ssh.detect_gui_terminal_launcher())
 
     @patch.object(ccrelay_ssh, "_run_ssh", return_value={"success": True, "exitCode": 0})
     def test_ssh_test_can_use_protected_dedicated_password_override(self, run_ssh):
@@ -1398,6 +1448,31 @@ class CcRelayCliTest(unittest.TestCase):
         else:
             self.assertEqual(0o600, self.ssh_config_path.stat().st_mode & 0o777)
         self.assertNotIn("dedicated-secret", json.dumps(shown, ensure_ascii=False))
+
+    def test_generated_dedicated_password_meets_common_complexity_policies(self):
+        with patch.object(ccrelay_ssh.secrets, "token_urlsafe", return_value="lowercaseonly" * 5):
+            password = ccrelay_ssh.random_secret()
+
+        self.assertGreaterEqual(len(password), 24)
+        self.assertRegex(password, r"[A-Z]")
+        self.assertRegex(password, r"[a-z]")
+        self.assertRegex(password, r"[0-9]")
+        self.assertRegex(password, r"[!@#%+=_-]")
+        self.assertNotRegex(password, r"[:'\"\\\s]")
+
+    def test_dedicated_password_replaces_existing_secret_that_fails_complexity_policy(self):
+        with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}):
+            config = ccrelay_ssh.load_config()
+            config["clusterIdentity"]["dedicatedAccount"]["passwordSecrets"] = {
+                "192.0.2.10:22": ccrelay_ssh.protect_secret("legacy-lowercase-password")
+            }
+            ccrelay_ssh.save_config(config)
+
+            password = ccrelay_identity.dedicated_password(
+                "default", "192.0.2.10:22", False)
+
+        self.assertNotEqual("legacy-lowercase-password", password)
+        self.assertTrue(ccrelay_ssh.secret_meets_complexity_policy(password))
 
     def seed_default_ssh_credential(self):
         with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}):
@@ -3075,6 +3150,18 @@ class CcRelayCliTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("$env:PYTHONIOENCODING = 'utf-8'", wrapper)
+
+    def test_prepare_model_config_windows_command_protects_api_path_from_msys_conversion(self):
+        with patch.object(prepare_cc_config.os, "name", "nt"):
+            command = prepare_cc_config.secure_terminal_command([
+                "--prompt-api-key",
+                "--api-path",
+                "/v1/messages",
+            ])
+
+        self.assertIn(" -Command ", command)
+        self.assertNotIn(" -File ", command)
+        self.assertIn("'--api-path' '/v1/messages'", command)
 
     def test_prepare_model_config_can_launch_secure_terminal(self):
         capabilities = {

@@ -554,6 +554,8 @@ def add_ssh_credential_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--port", type=int, default=22)
     parser.add_argument("--password-file", help="从临时文件读取密码；读取后不会输出密码。")
     parser.add_argument("--password-env", help="从指定环境变量读取密码；不会写入命令行参数。")
+    parser.add_argument("--prompt-password", action="store_true", help="在当前交互终端隐藏输入 SSH 密码。")
+    parser.add_argument("--launch-secure-terminal", action="store_true", help="在独立安全终端隐藏输入 SSH 密码。")
     parser.add_argument("--enable-passwordless", type=parse_bool, default=True)
     parser.add_argument("--allow-cluster-mutual", type=parse_bool, default=True)
     parser.add_argument("--remote-directory")
@@ -1571,9 +1573,15 @@ def config_history(args: argparse.Namespace) -> Any:
 
 
 def ssh_config_set_default(args: argparse.Namespace) -> Any:
+    command_args = ssh_config_command_args(
+        args,
+        ["ssh", "config", "set-default", "--username", args.username, "--port", str(args.port)],
+    )
+    if args.launch_secure_terminal:
+        return ccrelay_ssh.launch_secure_terminal(command_args)
     password = read_ssh_password(
         args,
-        ssh_config_command_args(args, ["ssh", "config", "set-default", "--username", args.username, "--port", str(args.port)]),
+        command_args,
         "DEFAULT",
     )
     return ccrelay_ssh.set_default_credential(
@@ -1601,9 +1609,15 @@ def ssh_config_set_passwordless_default(args: argparse.Namespace) -> Any:
 
 
 def ssh_config_set_node(args: argparse.Namespace) -> Any:
+    command_args = ssh_config_command_args(
+        args,
+        ["ssh", "config", "set-node", "--host", args.host, "--username", args.username, "--port", str(args.port)],
+    )
+    if args.launch_secure_terminal:
+        return ccrelay_ssh.launch_secure_terminal(command_args)
     password = read_ssh_password(
         args,
-        ssh_config_command_args(args, ["ssh", "config", "set-node", "--host", args.host, "--username", args.username, "--port", str(args.port)]),
+        command_args,
         "NODE",
         args.host,
         args.port,
@@ -1639,7 +1653,12 @@ def read_ssh_password(
 ) -> str:
     try:
         prompt = f"{host}:{port} SSH 密码: " if host and port else "通用 SSH 密码: "
-        return ccrelay_ssh.read_password_input(args.password_file, args.password_env, prompt)
+        return ccrelay_ssh.read_password_input(
+            args.password_file,
+            args.password_env,
+            prompt,
+            prompt_password=args.prompt_password,
+        )
     except ccrelay_ssh.SshCredentialInputRequired:
         raise ccrelay_ssh.SshCredentialInputRequired(
             ccrelay_ssh.credential_input_interaction(command_args, scope, host, port)

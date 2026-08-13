@@ -809,7 +809,10 @@ def dedicated_password(cluster_id: str, node_key: str, rotate: bool = False) -> 
     config = ccrelay_ssh.load_config()
     dedicated = config.setdefault("clusterIdentity", {}).setdefault("dedicatedAccount", {})
     secrets_map = dedicated.setdefault("passwordSecrets", {})
-    if rotate or node_key not in secrets_map:
+    current = None
+    if node_key in secrets_map:
+        current = ccrelay_ssh.unprotect_secret(secrets_map[node_key])
+    if rotate or not ccrelay_ssh.secret_meets_complexity_policy(current):
         secrets_map[node_key] = ccrelay_ssh.protect_secret(ccrelay_ssh.random_secret())
         ccrelay_ssh.save_config(config)
     return ccrelay_ssh.unprotect_secret(secrets_map[node_key])
