@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="codex-skill/ccrelay/assets/branding/ccrelay-logo.png" alt="CC Relay" width="220" />
+</p>
+
 # CC Relay 技能运行时
 
 ## 快速使用指南
