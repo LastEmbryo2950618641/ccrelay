@@ -13,7 +13,7 @@ https://www.7-zip.org/download.html
 
 Bundled files:
 
-- windows-x64/7zr.exe: official standalone Windows console executable
+- windows-x64/7za.exe: official x64 standalone Windows console executable from 7-Zip Extra
 - linux-x64/7zz: official Linux x86-64 console executable
 - macos-x64/7zz: official universal macOS console executable
 - macos-arm64/7zz: official universal macOS console executable

@@ -13,6 +13,8 @@ $backupRoot = Join-Path $installRoot ".ccrelay-bootstrap-$operationId"
 $archivePath = Join-Path $workRoot 'ccrelay-full.zip'
 $checksumPath = Join-Path $workRoot 'ccrelay-full.zip.sha256'
 $extractRoot = Join-Path $workRoot 'extracted'
+$volumeRoot = Join-Path $workRoot 'gitee-volumes'
+$recoveryRoot = Join-Path $workRoot 'gitee-recovered'
 
 function Download-File {
     param([string]$Url, [string]$Destination)
@@ -37,22 +39,104 @@ function Download-File {
     }
 }
 
+function Clear-DownloadedPackage {
+    Remove-Item -LiteralPath $archivePath, $checksumPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $volumeRoot, $recoveryRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Test-PackageChecksum {
+    $expected = ((Get-Content -Raw $checksumPath).Trim() -split '\s+')[0].ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($expected) -or $expected -ne $actual) {
+        throw 'SHA-256 verification failed'
+    }
+}
+
+function Get-SevenZipCommand {
+    $bundled = Join-Path $skillRoot 'assets\7zip\windows-x64\7za.exe'
+    $windowsArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    if ($windowsArchitecture -eq 'AMD64' -and (Test-Path $bundled -PathType Leaf)) {
+        return $bundled
+    }
+    foreach ($name in @('7z.exe', '7zz.exe', '7z', '7zz')) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($command) {
+            return $command.Source
+        }
+    }
+    throw 'No compatible bundled or system 7-Zip command is available'
+}
+
+function Assert-ContinuousVolumes {
+    param([object[]]$Volumes)
+    if (-not $Volumes -or $Volumes.Count -eq 0) {
+        throw 'Gitee latest Release does not contain ccrelay-full.zip.001 split assets'
+    }
+    $expected = 1
+    foreach ($volume in $Volumes) {
+        if ($volume.Number -ne $expected) {
+            throw ('Gitee split package is incomplete: expected .{0:d3}, found .{1:d3}' -f $expected, $volume.Number)
+        }
+        $expected++
+    }
+}
+
+function Expand-GiteeSplitArchive {
+    param([string]$FirstVolume)
+    $sevenZip = Get-SevenZipCommand
+    Remove-Item -LiteralPath $recoveryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $recoveryRoot | Out-Null
+    & $sevenZip x -tSplit -y "-o$recoveryRoot" $FirstVolume | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "7-Zip failed to restore the Gitee split package (exit code $LASTEXITCODE)"
+    }
+    $restored = Join-Path $recoveryRoot 'ccrelay-full.zip'
+    if (-not (Test-Path $restored -PathType Leaf)) {
+        throw 'Gitee split package did not restore the outer ZIP'
+    }
+    return $restored
+}
+
+function Expand-GiteeOuterArchive {
+    param([string]$OuterArchive)
+    $entryName = Get-GiteeOuterArchiveEntry $OuterArchive
+    $innerRoot = Join-Path $recoveryRoot 'inner'
+    New-Item -ItemType Directory -Force -Path $innerRoot | Out-Null
+    Expand-Archive -LiteralPath $OuterArchive -DestinationPath $innerRoot -Force
+    $innerArchive = Join-Path $innerRoot $entryName
+    if (-not (Test-Path $innerArchive -PathType Leaf)) {
+        throw 'Gitee outer ZIP does not contain ccrelay-full.zip'
+    }
+    Move-Item -LiteralPath $innerArchive -Destination $archivePath -Force
+}
+
+function Get-GiteeOuterArchiveEntry {
+    param([string]$OuterArchive)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $package = [System.IO.Compression.ZipFile]::OpenRead($OuterArchive)
+    try {
+        $entries = @($package.Entries)
+        if ($entries.Count -ne 1 -or $entries[0].FullName -ne 'ccrelay-full.zip') {
+            throw 'Gitee outer ZIP must contain only ccrelay-full.zip at its root'
+        }
+        return $entries[0].FullName
+    } finally {
+        $package.Dispose()
+    }
+}
+
 function Download-Package {
     param([string]$BaseUrl)
     $downloadBase = $BaseUrl.TrimEnd('/')
     try {
         Download-File "$downloadBase/ccrelay-full.zip" $archivePath
         Download-File "$downloadBase/ccrelay-full.zip.sha256" $checksumPath
-        $expected = ((Get-Content -Raw $checksumPath).Trim() -split '\s+')[0].ToLowerInvariant()
-        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
-        if ([string]::IsNullOrWhiteSpace($expected) -or $expected -ne $actual) {
-            throw 'SHA-256 verification failed'
-        }
+        Test-PackageChecksum
         Write-Output "CC Relay package source: $downloadBase"
         return $true
     } catch {
         Write-Warning "CC Relay package source failed: $downloadBase. $($_.Exception.Message)"
-        Remove-Item -LiteralPath $archivePath, $checksumPath -Force -ErrorAction SilentlyContinue
+        Clear-DownloadedPackage
         return $false
     }
 }
@@ -69,23 +153,33 @@ function Download-GiteePackage {
         }
         Download-File "$apiBase/releases/$($release.id)/attach_files" $attachmentMetadata
         $attachments = @(Get-Content -Raw $attachmentMetadata | ConvertFrom-Json)
-        $archive = $attachments | Where-Object { $_.name -eq 'ccrelay-full.zip' } | Select-Object -First 1
         $checksum = $attachments | Where-Object { $_.name -eq 'ccrelay-full.zip.sha256' } | Select-Object -First 1
-        if (-not $archive.id -or -not $checksum.id) {
-            throw 'Gitee latest Release does not contain the complete package assets'
+        if (-not $checksum.id) {
+            throw 'Gitee latest Release does not contain ccrelay-full.zip.sha256'
         }
-        Download-File "$apiBase/releases/$($release.id)/attach_files/$($archive.id)/download" $archivePath
+        $volumes = @($attachments | ForEach-Object {
+            if ($_.name -match '^ccrelay-full\.zip\.(\d{3})$') {
+                [pscustomobject]@{ Number = [int]$Matches[1]; Name = $_.name; Id = $_.id }
+            }
+        } | Sort-Object Number)
+        Assert-ContinuousVolumes $volumes
+        New-Item -ItemType Directory -Force -Path $volumeRoot | Out-Null
+        foreach ($volume in $volumes) {
+            if (-not $volume.Id) {
+                throw "Gitee split asset has no id: $($volume.Name)"
+            }
+            Download-File "$apiBase/releases/$($release.id)/attach_files/$($volume.Id)/download" (Join-Path $volumeRoot $volume.Name)
+        }
         Download-File "$apiBase/releases/$($release.id)/attach_files/$($checksum.id)/download" $checksumPath
-        $expected = ((Get-Content -Raw $checksumPath).Trim() -split '\s+')[0].ToLowerInvariant()
-        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
-        if ([string]::IsNullOrWhiteSpace($expected) -or $expected -ne $actual) {
-            throw 'SHA-256 verification failed'
-        }
+        $outerArchive = Expand-GiteeSplitArchive (Join-Path $volumeRoot 'ccrelay-full.zip.001')
+        Expand-GiteeOuterArchive $outerArchive
+        Test-PackageChecksum
         Write-Output "CC Relay package source: $apiBase/releases/latest"
         return $true
     } catch {
         Write-Warning "CC Relay Gitee source failed: $apiBase. $($_.Exception.Message)"
-        Remove-Item -LiteralPath $archivePath, $checksumPath, $releaseMetadata, $attachmentMetadata -Force -ErrorAction SilentlyContinue
+        Clear-DownloadedPackage
+        Remove-Item -LiteralPath $releaseMetadata, $attachmentMetadata -Force -ErrorAction SilentlyContinue
         return $false
     }
 }

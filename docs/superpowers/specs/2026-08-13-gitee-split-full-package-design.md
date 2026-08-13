@@ -2,7 +2,7 @@
 
 ## 背景
 
-Gitee Release 单文件上限为 100 MB。`ccrelay-full.zip` 在 Gitee 上以 7-Zip 分卷压缩包发布，资产名为 `ccrelay-full.zip.001`、`.002` 等；从 `.001` 解压后才得到需要校验和安装的完整 `ccrelay-full.zip`。GitHub Release 不受此流程影响，仍直接发布 `ccrelay-full.zip`。
+Gitee Release 单文件上限为 100 MB。完整包在 Gitee 上以 7-Zip 分卷压缩包发布，资产名为 `ccrelay-full.zip.001`、`.002` 等；先从 `.001` 恢复出外层 ZIP，再解压外层 ZIP，才得到需要校验和安装的内层 `ccrelay-full.zip`。GitHub Release 不受此流程影响，仍直接发布 `ccrelay-full.zip`。
 
 当前引导 Skill 和 Windows/Linux 安装脚本将两个来源都视为单个 ZIP，导致 Gitee 优先下载无法使用并回退 GitHub。
 
@@ -23,9 +23,9 @@ Gitee Release 单文件上限为 100 MB。`ccrelay-full.zip` 在 Gitee 上以 7-
 3. 筛选名称匹配 `ccrelay-full.zip.NNN` 的附件，按三位数字后缀升序排列。
 4. 要求第一卷为 `.001`，且所有编号连续；缺卷、重号或没有分卷均视为 Gitee 来源失败。
 5. 将全部分卷下载到同一临时目录，并保留原始文件名。
-6. 根据当前操作系统和 CPU 架构选择引导包内置的 7-Zip 命令，从 `.001` 解压，在独立恢复目录中得到 `ccrelay-full.zip`。内置平台不匹配时才尝试系统 `7z` 或 `7zz`。
-7. 仅接受恢复目录根部唯一的 `ccrelay-full.zip`，将其作为待安装归档。
-8. 按 SHA-256 文件校验恢复出的完整 ZIP。
+6. 根据当前操作系统和 CPU 架构选择引导包内置的 7-Zip 命令，从 `.001` 恢复出外层 ZIP。内置平台不匹配时才尝试系统 `7z` 或 `7zz`。
+7. 使用系统 ZIP 解压能力打开外层 ZIP，并要求其中存在唯一的 `ccrelay-full.zip`；该内层文件才是待安装归档。
+8. 按 SHA-256 文件校验内层完整 ZIP。
 
 ### GitHub 和自定义来源
 
@@ -38,7 +38,7 @@ Gitee Release 单文件上限为 100 MB。`ccrelay-full.zip` 在 Gitee 上以 7-
 - 安装脚本优先使用匹配平台和架构的内置程序。没有匹配项时，Windows 依次查找系统 `7z.exe`、`7zz.exe`、`7z`、`7zz`；POSIX 依次查找 `7z`、`7zz`。
 - 7-Zip 仅用于 Gitee 分卷恢复。没有匹配的内置程序且系统也未安装时，Gitee 来源失败并自动尝试 GitHub，不阻止 GitHub 单 ZIP 安装。
 - 引导 Skill 随附 7-Zip 许可证与来源说明，明确使用 7-Zip、GNU LGPL/BSD/unRAR 许可构成，并链接官方源码页面。
-- 分卷元数据异常、下载失败、7-Zip 返回非零、未生成目标 ZIP或 SHA-256 不匹配，均不得覆盖现有 Skill。
+- 分卷元数据异常、下载失败、7-Zip 返回非零、外层 ZIP 缺少内层完整包或 SHA-256 不匹配，均不得覆盖现有 Skill。
 - 每次来源失败后删除归档、校验文件、分卷和恢复目录，防止残留数据污染回退流程。
 - 最终所有来源均失败时，错误信息需指出 Gitee 分卷恢复或 GitHub 下载均未成功。
 
@@ -49,7 +49,7 @@ Gitee Release 单文件上限为 100 MB。`ccrelay-full.zip` 在 Gitee 上以 7-
 - 引导 Skill 明确出现 Gitee 分卷、`.001`、7-Zip、恢复完整 ZIP 和 GitHub 直接 ZIP 的说明。
 - Windows/Linux 脚本均识别 `ccrelay-full.zip.NNN`，检查连续编号，按平台选择内置 7-Zip 并保留系统命令回退。
 - 引导包包含所有声明支持平台的工具、SHA-256 清单和许可证来源说明，且文件摘要与清单一致。
-- Gitee 校验发生在分卷恢复之后。
+- Gitee 校验发生在分卷恢复和外层 ZIP 解压之后，并以得到的内层 `ccrelay-full.zip` 为对象。
 - GitHub 和自定义来源仍请求 `ccrelay-full.zip`。
 - Gitee 失败后仍保留 GitHub 回退路径。
 
