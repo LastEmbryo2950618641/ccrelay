@@ -10,7 +10,7 @@ description: 一次性安装 CC Relay 完整 Skill。用户首次要求使用 cc
 当用户要求使用 CC Relay 时：
 
 1. 不询问用户是否更新，也不展示版本选择。
-2. Windows 立即执行当前 Skill 目录下的 `scripts/install-latest.ps1`；Linux/macOS 立即执行 `scripts/install-latest.sh`。
+2. Windows 使用 Windows PowerShell 5.1 或 PowerShell 7 及以上版本，立即执行当前 Skill 目录下的 `scripts/install-latest.ps1`；PowerShell 3、4、5.0 和 6 不在支持范围。Linux/macOS 立即执行 `scripts/install-latest.sh`。
 3. 脚本默认优先使用 Gitee `latest` Release。Gitee 的完整包是 7-Zip 分卷：下载全部连续的 `ccrelay-full.zip.001`、`.002` 等分卷和对应 SHA-256，使用引导包内置的 7-Zip 从 `.001` 恢复出外层 ZIP，再解压外层 ZIP 得到真正的 `ccrelay-full.zip`，最后校验内层完整 ZIP；不要求用户预装 7-Zip。分卷缺失、恢复、下载或校验失败时整体回退 GitHub Latest Release。GitHub 直接下载完整的 `ccrelay-full.zip` 和对应 SHA-256，不执行分卷恢复。校验通过后覆盖当前 `ccrelay` 目录，并保留已有 `.local` 数据。
 4. 安装成功后，本引导 Skill 已被完整 Skill 替换。立即重新读取当前目录中的 `SKILL.md`，按照完整规范继续处理用户最初的请求。
 5. 下载、校验或覆盖失败时，只报告实际错误和重试命令；不得声称 CC Relay 已安装。

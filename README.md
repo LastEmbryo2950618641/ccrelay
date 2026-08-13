@@ -27,6 +27,8 @@
 
 随后按照会话中的指引操作。引导 Skill 会优先从 Gitee 下载、恢复并校验完整包；失败时自动回退 GitHub。下载完成后，引导 Skill 会被完整 CC Relay Skill 覆盖。
 
+Windows 安装支持 Windows PowerShell 5.1 或 PowerShell 7 及以上版本，不支持 PowerShell 3、4、5.0 和 6。
+
 ### 4. 查看节点状态或部署 CC Relay
 
 查看远端机器负载：

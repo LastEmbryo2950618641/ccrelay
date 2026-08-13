@@ -4,6 +4,15 @@ param(
     [string]$GitHubReleaseBaseUrl = 'https://github.com/LastEmbryo2950618641/ccrelay/releases/latest/download'
 )
 
+$powerShellVersion = $PSVersionTable.PSVersion
+$powerShellEdition = $PSVersionTable.PSEdition
+$isWindowsPowerShell51 = $powerShellEdition -eq 'Desktop' -and
+    $powerShellVersion.Major -eq 5 -and $powerShellVersion.Minor -eq 1
+$isPowerShell7OrLater = $powerShellEdition -eq 'Core' -and $powerShellVersion.Major -ge 7
+if (-not ($isWindowsPowerShell51 -or $isPowerShell7OrLater)) {
+    throw "Unsupported PowerShell version: $($powerShellVersion.ToString()) ($powerShellEdition). Use Windows PowerShell 5.1 or PowerShell 7 or later."
+}
+
 $ErrorActionPreference = 'Stop'
 $skillRoot = Split-Path $PSScriptRoot -Parent
 $installRoot = Split-Path $skillRoot -Parent
@@ -165,7 +174,7 @@ function Download-GiteePackage {
             throw 'Gitee latest Release does not contain an id'
         }
         Download-File "$apiBase/releases/$($release.id)/attach_files" $attachmentMetadata 'Gitee attachment metadata'
-        $attachments = @(Get-Content -Raw $attachmentMetadata | ConvertFrom-Json)
+        $attachments = @(Get-Content -Raw $attachmentMetadata | ConvertFrom-Json | ForEach-Object { $_ })
         $checksum = $attachments | Where-Object { $_.name -eq 'ccrelay-full.zip.sha256' } | Select-Object -First 1
         if (-not $checksum.id) {
             throw 'Gitee latest Release does not contain ccrelay-full.zip.sha256'

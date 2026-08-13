@@ -107,6 +107,54 @@ class ReleasePackageTest(unittest.TestCase):
         self.assertLess(shell.index("expand_gitee_outer_archive"), shell.rindex("verify_package_checksum"))
         self.assertIn('"$base_url/ccrelay-full.zip"', shell)
 
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell compatibility test")
+    def test_windows_powershell_expands_gitee_attachment_array(self):
+        repository = Path(__file__).resolve().parents[1]
+        script = (repository / "bootstrap-skill/ccrelay/scripts/install-latest.ps1").read_text(encoding="utf-8")
+        expected_expression = (
+            "$attachments = @(Get-Content -Raw $attachmentMetadata | "
+            "ConvertFrom-Json | ForEach-Object { $_ })"
+        )
+        self.assertIn(expected_expression, script)
+
+        fixture = json.dumps([
+            {"id": 1, "name": "ccrelay-full.zip.sha256"},
+            {"id": 2, "name": "ccrelay-full.zip.001"},
+            {"id": 3, "name": "ccrelay-full.zip.002"},
+            {"id": 4, "name": "ccrelay-full.zip.003"},
+            {"id": 5, "name": "ccrelay-full.zip.004"},
+        ])
+        with tempfile.TemporaryDirectory() as temporary:
+            metadata = Path(temporary) / "attachments.json"
+            metadata.write_text(fixture, encoding="utf-8")
+            command = (
+                f"$attachments = @(Get-Content -Raw '{metadata}' | ConvertFrom-Json | ForEach-Object {{ $_ }}); "
+                "$volumes = @($attachments | Where-Object { $_.name -match "
+                "'^ccrelay-full\\.zip\\.(\\d{3})$' }); "
+                "Write-Output ($attachments.Count.ToString() + ',' + $volumes.Count.ToString())"
+            )
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", command],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual("5,4", result.stdout.strip())
+
+    def test_bootstrap_declares_supported_powershell_versions(self):
+        repository = Path(__file__).resolve().parents[1]
+        script = (repository / "bootstrap-skill/ccrelay/scripts/install-latest.ps1").read_text(encoding="utf-8")
+        skill = (repository / "bootstrap-skill/ccrelay/SKILL.md").read_text(encoding="utf-8")
+        readme = (repository / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("$isWindowsPowerShell51", script)
+        self.assertIn("$isPowerShell7OrLater", script)
+        self.assertIn("$powerShellVersion.Major -ge 7", script)
+        self.assertIn("Use Windows PowerShell 5.1 or PowerShell 7 or later", script)
+        for document in (skill, readme):
+            self.assertIn("Windows PowerShell 5.1", document)
+            self.assertIn("PowerShell 7", document)
+
     def test_gitee_build_makes_gradle_wrapper_executable_before_detecting_it(self):
         repository = Path(__file__).resolve().parents[1]
         build_script = (repository / "scripts/gitee_go_build.sh").read_text(encoding="utf-8")
