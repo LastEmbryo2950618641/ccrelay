@@ -2,6 +2,20 @@
 
 该技能驱动本地 jar 服务中的独立运行时，并通过它控制远端 relay 节点。
 
+## 部署架构契约
+
+部署前先建立以下全局认识，再选择命令。部署的目的不是把文件复制到机器，而是让所有目标节点进入由 CC center 管理、可验证、可继续协作的状态。
+
+- **调用端 AI**：理解用户意图、维护完整目标节点集合、驱动引导、展示进度和处理失败分流；它不充当集群控制面，也不凭会话记忆代替持久化状态。
+- **CC center 控制面**：保存会话、授权、节点注册、心跳、任务、Skill 元数据和部署状态，编排 Relay 与 Agent；中心 SQLite 是这些控制面事实的持久化来源，升级时必须保留。
+- **Center Relay sidecar**：与 CC center 同机但独立运行，代表中心参与 Agent 协作，并承担中心侧的 Relay 健康、注册和首次心跳验收；只有 sidecar 可用，中心节点才算完整部署。
+- **远端 Relay 与 Agent**：Relay 负责接收中心任务、维护会话队列、暴露健康与心跳；Agent 在 Relay 注入的统一职责和权限约束下执行本机观察、工具调用与 A2A 协作。
+- **SSH 引导身份**：用户提供的 SSH 账号用于初始连通、创建或验证专用账号、安装密钥和传输制品。SSH 只负责引导和部署恢复，不替代部署后的 Relay/A2A 业务协作。
+- **制品、模型配置与 Skill 分发**：完整运行时和调用端本机选定的模型配置由中心部署到目标；中心管理 Skill 元数据，其他 Relay 按心跳同步。不得扫描远端机器自己的模型配置来拼装集群。
+- **部署里程碑**：本地阶段库保存 `UNINITIALIZED`、`SSH_READY`、`DEPLOYED`；目标节点集合必须先持久化。只有身份能力、Center/sidecar、Relay 注册与心跳、模型连接和协同验收全部满足后，才能标记 `DEPLOYED`。
+
+每一步开始前用一句内部工作说明确认“本步目标”和“成功证据”。例如，`identity apply` 的目标是形成已选拓扑所需的 SSH 身份能力，成功证据是完整 active 节点集合通过 `identity verify`，而不是命令退出码为零。
+
 ## Relay 职责提示词
 
 每个 Relay 在服务端执行 AI 前都会自动注入统一的 `relay-system-prompt.txt`。它明确 Relay 只负责本机观察、受控工具执行和 A2A 协作，CC center 负责授权、会话、节点编排和结果汇总。
@@ -66,6 +80,42 @@
 5. 获取当前 CC center 的部署公钥，用已验证的本地凭据写入目标节点。
 6. 由当前 CC center 自己执行免密预检；只有中心返回 `READY` 才允许中心部署。
 7. 若依然失败，向用户说明是网络、认证、权限还是远端缺工具。
+
+## 脚本失败的自然语言兜底
+
+### 触发与边界
+
+出现不支持的命令参数、shell/PowerShell 路径转换错误、脚本异常退出、同一步骤失败两次、连续两轮没有可验证进展或任务进入 `STALLED` 时，停止机械重试。先保留完整 stdout/stderr、失败节点和已完成节点，再执行以下过程：
+
+1. 说明本步骤真正要达到的目标，例如“确认 SSH 可达”“创建专用账号”“让 Center 可用专用密钥登录目标”“复制并启动 Relay”。
+2. 区分脚本实现问题与环境问题；只替代发生兼容问题的执行步骤，不绕过用户尚未确认的账号、节点、安全或覆盖部署选择。
+3. 根据目标机器实际提供的命令选择标准工具。SSH 7.4 等旧环境不支持某参数时，删去该参数或采用用户提供的 SSH 参数；不要反复执行已知不兼容的命令。
+4. 每个节点记录命令结果和验证证据。同批节点处理完后统一报告失败分流，不自动排除节点。
+5. 手工步骤完成后立即回到 CC Relay 标准命令做状态回写与标准验收。
+
+秘密只能通过已确认的安全输入、进程环境或受保护临时文件传递。不得把密码、API key、私钥或授权令牌写入命令行、日志、任务 payload 或回复。不得把手工命令成功等同于部署完成。
+
+### 按目标选择等价操作
+
+| 目标 | 自然语言引导的等价操作 | 必须取得的证据 |
+|---|---|---|
+| SSH 连通性探测 | 使用用户确认的用户名、端口、私钥和兼容参数直接执行 `ssh <target> 'printf CCRELAY_SSH_OK'`；需要自定义参数时完整沿用用户参数 | 目标输出固定探针值，并记录实际主机、端口与账号 |
+| 专用账号创建 | 通过引导账号登录，先检查账号是否存在；需要创建时使用目标系统支持的 `useradd`/`adduser` 和明确的 `sudo`，再准备 home、`.ssh` 与产品目录 | 账号存在，home/目录属主正确；引导账号无读取权限时改用专用账号密钥验证，不误判创建失败 |
+| 公钥安装 | 在本地或 Center 生成已选算法密钥；通过 SSH 将公钥追加到专用账号的 `authorized_keys`，设置 `.ssh` 为 `0700`、文件为 `0600` 并修正属主 | 使用对应私钥从要求的拓扑发起无交互登录成功；算法与目标 `PubkeyAcceptedAlgorithms` 兼容 |
+| Center 到节点身份 | 在 Center 节点使用 Center 管理私钥逐个验证 active 目标；大集群按已选 `CENTER_ONLY` 拓扑验证，不额外构造 FULL_MESH | `identity verify` 对完整 active 节点集合返回预期能力，没有空信任边却声称 `FULL_MESH` |
+| 制品传输 | 用 `scp`、`sftp` 或 `tar` 流传输完整 runtime/config/Skill 制品；Windows 本地路径传给 OpenSSH 时使用 `/` 分隔并显式指定远端目标文件名 | 远端文件名、大小和 SHA-256 与源一致，解包目录没有额外嵌套层级 |
+| 进程启动 | 使用制品内安装/启动脚本；脚本本身不可运行时，按同一配置直接调用包内 JRE 启动 JAR，并使用目标系统已有的 `systemd`、`nohup` 或等价服务管理方式 | 进程存活只是中间证据，还必须取得 health 成功 |
+| 注册与心跳 | 检查目标配置中的中心地址和节点身份，查看 Relay 日志；必要时仅重启本次目标 Relay 触发重新注册 | Center 注册表出现真实 `nodeId`、endpoint 与 workspace，首次心跳成功且持续健康 |
+
+### 状态回写与标准验收
+
+手工兜底完成后按受影响范围恢复标准闭环：
+
+1. 身份相关操作重新执行 `<CLI> ssh identity verify`，以完整 active 节点集合确认 `CENTER_ONLY` 或 `FULL_MESH`。
+2. Center 或 sidecar 操作重新执行 `<CLI> center status`；升级场景仍通过 `center bootstrap --force-redeploy` 的状态语义确认 SQLite、health、sidecar 注册和心跳，不以替换 JAR 本身作为成功。
+3. Relay 操作通过 `<CLI> relay scan`、`<CLI> relay node <nodeId>` 和部署任务事件确认注册、心跳、工作目录与最终逻辑节点身份。
+4. 执行最小真实协同验收，确认模型配置和 Agent/A2A 链路可用。
+5. 全部 active 节点达到验收条件后才执行 `<CLI> bootstrap mark-deployed`；否则保留失败节点和阶段，向用户提供按原因治理或明确排除的选择。
 
 ### 本地配置约定
 
@@ -214,13 +264,13 @@ SSH 端口: 22
 <CLI> ssh identity verify --center-node <centerHost>:<sshPort> --node <hostA>:<sshPort>
 ```
 
-AI 决策规则：`FULL_MESH` 才能考虑节点间 SSH 自复制；`CENTER_ONLY` 只能使用 relay/A2A 协同或中心 SSH 兜底；`DEGRADED` 和 `UNKNOWN` 必须先刷新预检。
+AI 决策规则：账号模式与信任拓扑独立。专用 `ccrelay` 账号既可使用 `CENTER_ONLY`，也可使用 `FULL_MESH`。`trustTopology=AUTO` 使用当前完整 active 节点数与 `fullMeshThreshold` 比较，超过阈值时解析为 `CENTER_ONLY`，等于或低于阈值时解析为 `FULL_MESH`，不得对 55 或其他节点数写特殊分支。`FULL_MESH` 才能考虑节点间 SSH 自复制；`CENTER_ONLY` 只在 Center 安装私钥，普通节点仅安装公钥，并通过一次外层 Center SSH 在 Center 内并发验证所有目标；后续使用 relay/A2A 协同或中心 SSH 兜底。`DEGRADED` 和 `UNKNOWN` 必须先刷新预检。
 
 首次 `bootstrap next` 会把用户确认的完整部署范围写入本地 `targetNodes`。后续身份和中心规划命令都以 active `targetNodes` 为准，当前命令只传部分节点不能缩小范围。认证失败节点优先配置独立凭据；网络不可达节点可重试或保留为失败，只有用户明确确认后才使用 `ssh identity targets exclude --node <host:port> --confirm true` 排除。
 
 账号创建、密钥安装、互信验证和 Relay 资源包部署均采用“同批执行完成后统一决策”：单节点失败不取消其他节点，但同批存在失败时不得进入下一阶段。CLI 返回 `PARTIAL_FAILURE_REQUIRES_DECISION`，逐节点给出失败阶段、失败类型、摘要和治理提示；Skill 只能让用户选择按原因治理、明确排除失败节点或取消，不得自行重试、修复或缩小节点范围。治理或排除后必须重新验收当前完整 active 节点集合。
 
-验收 `FULL_MESH` 时必须核对目标节点数和有向信任边数：N 个节点需要 `N * (N - 1)` 条 READY 边。多节点目标集合出现 `trustEdges=[]` 必须判定为未完成，不能解释为无需节点间互信。
+验收 `FULL_MESH` 时必须核对目标节点数和有向信任边数：N 个节点需要 `N * (N - 1)` 条 READY 边。只有明确解析为 `CENTER_ONLY` 时才允许 `trustEdges=[]` 并将节点间状态标记为 `NOT_REQUIRED`；FULL_MESH 多节点目标出现空信任边必须判定为未完成。
 
 #### 交互要求
 
@@ -287,7 +337,7 @@ AI 决策规则：`FULL_MESH` 才能考虑节点间 SSH 自复制；`CENTER_ONLY
 - 多节点 `fanout` 默认不是同步等待所有节点返回，而是先初始化全部参与节点和主 Agent，再异步创建任务并返回逐节点状态。调用 Skill 的 AI 后续通过 `session get`、`session messages` 和任务事件反馈会话进度。
 - 所有 Relay 使用同一份固定职责提示词，并根据中心下发的 `coordinatorNodeId`、`coordinatorEpoch`、`participantNodeIds` 和 `agentRole` 判断本轮职责；主 Agent 是临时协调角色，不具备额外事实权威。
 - 主 Agent 不可用时只接受 CC center 的 `COORDINATOR_CHANGED` 会话控制事件，不允许节点自行选举。新主 Agent 先同步共享上下文增量，再继续原会话。
-- 发现远端 Agent 不可用时，不要手工 SSH 修好后算成功；必须通过 skill 内 `<CLI>` 恢复、部署或失败报告路径闭环。
+- 发现远端 Agent 不可用时，不要手工 SSH 修好后直接算成功。正常情况必须通过 skill 内 `<CLI>` 恢复或部署；只有脚本符合本手册的兼容故障触发条件时，才允许用“脚本失败的自然语言兜底”替代失败步骤，并在操作后回到 `<CLI>` 的状态回写、验证或失败报告路径闭环。
 - 发现本地 Skill runtime 缺少 `app.jar`、JRE、内置 Python 或部署脚本时，立即报告 `SKILL_RUNTIME_INCOMPLETE` 并停止。禁止搜索历史会话、历史命令、SSH 配置或私钥来猜测凭据，也禁止绕过 Skill 直接 SSH；先安装完整发布包，再从第一步重新引导。
 - 未注册目标仅提供 IP/SSH 端口时，首次访问统一执行 `<CLI> ssh identity plan --node <ip:port>...`，不要逐节点调用 `ssh preflight` 代替集群引导。任何命令返回 `NEED_USER_INPUT` 后立即结束当前轮次，逐项原样展示 `prompt/options/applicability/securityWarning/fields`；不得改写成“把用户名密码发给我”。只有用户明确选择明文输入后，才展示和接收秘密字段。
 
@@ -353,6 +403,7 @@ mock agent 只能验证 relay、授权和 A2A 通道，不代表真实 AI 链路
 - 如果自复制失败且 `enableCenterFallback=true`，运行时自动切换到中心侧 SSH 部署。
 - SSH 兜底是最后手段；即便 SSH 部署成功，也必须等注册与健康检查通过后才视为节点可用。
 - 部署耗时时使用 `<CLI> task observe <taskId>` 或父任务批量观测查看每个目标节点的阶段、百分比、已传输字节、滚动速度、预计剩余时间、耗时和最近更新时间；监控只读，不通过监控视图修改执行参数。
+- `task create-batch --concurrency <n>` 的并发值必须传到服务端真实部署闸门；处于 `WAITING_BATCH_SLOT` 的节点是在排队等待许可，不是卡住。实际同时传输和安装的节点数不得超过该批次上限。
 - `COPYING_ARTIFACT` 等长阶段必须持续产生 `DEPLOY_NODE_PROGRESS` 快照。总大小未知时仍展示传输字节和速度；超过停滞阈值无更新时明确显示 `STALLED`，不得把无进展任务持续显示为普通运行中。
 
 ## 必需上下文字段

@@ -43,6 +43,7 @@ public class AiRelayDeployServiceImpl implements AiRelayDeployService {
     private final AiRelayGrantService relayGrantService;
     private final boolean nodeWhitelistEnabled;
     private final List<String> allowedNodeIds;
+    private final DeployConcurrencyGate deployConcurrencyGate = new DeployConcurrencyGate();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     AiRelayDeployServiceImpl(AiDeployRecordRepository deployRecordRepository,
@@ -137,11 +138,52 @@ public class AiRelayDeployServiceImpl implements AiRelayDeployService {
             rejectWhitelistDenied(task, deployRecord, now);
             return;
         }
-        if (isSelfReplicateMode(deployRecord.getDeployMode())) {
-            startSelfReplicate(task, request, deployRecord, now);
-            return;
+        Map<String, Object> payload = request.getPayload() == null ? Map.of() : request.getPayload();
+        String deploymentBatchId = readString(payload, "deploymentBatchId", null);
+        int deploymentBatchConcurrency = readInteger(payload, "deploymentBatchConcurrency", 1);
+        if (!isBlank(deploymentBatchId)) {
+            markWaitingForBatchSlot(task, deployRecord, deploymentBatchId, deploymentBatchConcurrency);
         }
-        executeCenterDeploy(task, request, deployRecord, now);
+        try (DeployConcurrencyGate.Permit ignored = deployConcurrencyGate.acquire(
+                deploymentBatchId, deploymentBatchConcurrency)) {
+            AiTaskEntity currentTask = findTaskWithRetry(taskId);
+            if (isTerminalTask(currentTask)) {
+                convergeDeployRecordAfterTerminalTask(
+                        currentTask, deployRecord, String.valueOf(System.currentTimeMillis()));
+                return;
+            }
+            task = currentTask;
+            if (isSelfReplicateMode(deployRecord.getDeployMode())) {
+                startSelfReplicate(task, request, deployRecord, String.valueOf(System.currentTimeMillis()));
+                return;
+            }
+            executeCenterDeploy(task, request, deployRecord, String.valueOf(System.currentTimeMillis()));
+        }
+    }
+
+    private void markWaitingForBatchSlot(AiTaskEntity task, AiDeployRecordEntity deployRecord,
+                                         String batchId, int concurrency) {
+        String now = String.valueOf(System.currentTimeMillis());
+        task.setStatus("WAITING_DEPLOY");
+        task.setCurrentStage("WAITING_BATCH_SLOT");
+        task.setUpdateTime(now);
+        Map<String, Object> result = readJson(task.getResultJson());
+        result.put("deploymentBatchId", batchId);
+        result.put("deploymentBatchConcurrency", Math.max(1, Math.min(32, concurrency)));
+        result.put("deployProgress", Map.of(
+                "phase", "WAITING_BATCH_SLOT",
+                "progressPercent", 0,
+                "updatedTime", System.currentTimeMillis(),
+                "message", "等待批量部署并发许可"
+        ));
+        task.setResultJson(writeJson(result));
+        taskRepository.save(task);
+        Map<String, Object> event = eventPayload(
+                task, deployRecord, task.getStatus(), task.getCurrentStage(), null);
+        event.put("deploymentBatchId", batchId);
+        event.put("deploymentBatchConcurrency", Math.max(1, Math.min(32, concurrency)));
+        taskEventService.appendEvent(task.getTaskId(), task.getSessionId(), "DEPLOY_WAITING_BATCH_SLOT",
+                nextSequence(task.getTaskId()), event);
     }
 
     @Override
@@ -1023,7 +1065,8 @@ public class AiRelayDeployServiceImpl implements AiRelayDeployService {
         String status = task.getStatus();
         return "FAILED".equalsIgnoreCase(status)
                 || "CANCELLED".equalsIgnoreCase(status)
-                || "CANCELED".equalsIgnoreCase(status);
+                || "CANCELED".equalsIgnoreCase(status)
+                || "TIMEOUT".equalsIgnoreCase(status);
     }
 
     private void convergeDeployRecordAfterTerminalTask(AiTaskEntity task, AiDeployRecordEntity deployRecord, String now) {

@@ -142,7 +142,7 @@ public class SshIdentityServiceImpl implements SshIdentityService {
 
         List<SshNodeAccessStateEntity> savedNodes = nodeRepository.findByClusterIdOrderByNodeKeyAsc(clusterId);
         List<SshNodeTrustEdgeEntity> savedEdges = edgeRepository.findByClusterIdOrderBySourceNodeKeyAscTargetNodeKeyAsc(clusterId);
-        Capability capability = deriveCapability(accountMode, savedNodes, savedEdges);
+        Capability capability = deriveCapability(accountMode, policy.getClusterKeyMode(), savedNodes, savedEdges);
         policy.setCenterToNodeStatus(capability.centerStatus());
         policy.setNodeToNodeStatus(capability.meshStatus());
         policy.setEffectiveCapability(capability.value());
@@ -186,6 +186,7 @@ public class SshIdentityServiceImpl implements SshIdentityService {
     }
 
     private Capability deriveCapability(String accountMode,
+                                        String clusterKeyMode,
                                         List<SshNodeAccessStateEntity> nodes,
                                         List<SshNodeTrustEdgeEntity> edges) {
         boolean allCenterReady = !nodes.isEmpty() && nodes.stream()
@@ -204,11 +205,13 @@ public class SshIdentityServiceImpl implements SshIdentityService {
         int requiredEdgeCount = nodes.size() * Math.max(0, nodes.size() - 1);
         boolean singleNodeDedicated = nodes.size() == 1 && "DEDICATED_MANAGED".equals(accountMode);
         boolean fullMeshReady = requiredEdgeCount > 0 && readyEdges.size() == requiredEdgeCount;
-        if (allCenterReady && (fullMeshReady || singleNodeDedicated)) {
+        boolean centerOnlyTopology = clusterKeyMode != null
+                && clusterKeyMode.toUpperCase().startsWith("CENTER_ONLY");
+        if (allCenterReady && !centerOnlyTopology && (fullMeshReady || singleNodeDedicated)) {
             return new Capability("READY", "READY", "FULL_MESH");
         }
         if (allCenterReady) {
-            String meshStatus = "EXISTING_ACCOUNT".equals(accountMode) && edges.isEmpty()
+            String meshStatus = (centerOnlyTopology || "EXISTING_ACCOUNT".equals(accountMode)) && edges.isEmpty()
                     ? "NOT_REQUIRED" : "PARTIAL";
             return new Capability("READY", meshStatus, "CENTER_ONLY");
         }
@@ -226,6 +229,10 @@ public class SshIdentityServiceImpl implements SshIdentityService {
             return "DISABLED";
         }
         if ("FULL_MESH".equals(capability.value())) {
+            return "ACTIVE";
+        }
+        if ("CENTER_ONLY".equals(capability.value())
+                && nodes.stream().allMatch(node -> "ACTIVE".equalsIgnoreCase(node.getAccountStatus()))) {
             return "ACTIVE";
         }
         if (nodes.isEmpty()) {

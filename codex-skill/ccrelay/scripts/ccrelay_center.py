@@ -426,6 +426,11 @@ def bootstrap(plan_result: Dict[str, Any], hmac_secret: str, timeout_seconds: in
         return plan_result
     selected = dict(plan_result["selected"])
     config = ccrelay_ssh.load_config()
+    dedicated = (config.get("clusterIdentity") or {}).get("dedicatedAccount") or {}
+    center_key_algorithm = ccrelay_identity.normalize_key_algorithm(
+        (dedicated.get("clusterKey") or {}).get("algorithm") or dedicated.get("keyAlgorithm"))
+    if center_key_algorithm == "AUTO":
+        center_key_algorithm = "RSA"
     access = runtime_access(selected, config)
     bundle = skill_root() / "assets" / "runtime-bundle" / ccrelay_identity.DEFAULT_PRODUCT_NAME
     if not (bundle / "app.jar").is_file():
@@ -486,7 +491,9 @@ def bootstrap(plan_result: Dict[str, Any], hmac_secret: str, timeout_seconds: in
             "BUNDLE_TRANSFER",
         )
     update_bootstrap_attempt(attempt, "CENTER_START")
-    started = start_remote_center(selected, access, remote_directory, center_port, hmac_secret, timeout_seconds)
+    started = start_remote_center(
+        selected, access, remote_directory, center_port, hmac_secret, timeout_seconds,
+        center_key_algorithm)
     if not started.get("success"):
         diagnostic = diagnose_remote_center(selected, access, remote_directory, center_port, 20)
         cleanup = stop_remote_center(selected, access, remote_directory, 20)
@@ -1243,12 +1250,13 @@ def create_remote_directory(node: Dict[str, Any], access: Dict[str, Any], direct
 
 
 def start_remote_center(node: Dict[str, Any], access: Dict[str, Any], directory: str, port: int,
-                        hmac_secret: str, timeout_seconds: int) -> Dict[str, Any]:
+                        hmac_secret: str, timeout_seconds: int,
+                        key_algorithm: str = "RSA") -> Dict[str, Any]:
     if str(node.get("osType") or "").upper() == "WINDOWS":
-        script = windows_start_script(directory, port, hmac_secret)
+        script = windows_start_script(directory, port, hmac_secret, key_algorithm)
         command = "powershell.exe -NoProfile -NonInteractive -Command -"
     else:
-        script = linux_start_script(directory, port, hmac_secret)
+        script = linux_start_script(directory, port, hmac_secret, key_algorithm)
         command = "/bin/sh -s"
     return run_command(node, access, command, timeout_seconds, stdin_text=script, include_output=True)
 
@@ -1513,7 +1521,8 @@ tail -n {log_lines} "$bundle/center-relay.log" 2>/dev/null || true
     }
 
 
-def linux_start_script(directory: str, port: int, hmac_secret: str) -> str:
+def linux_start_script(directory: str, port: int, hmac_secret: str,
+                       key_algorithm: str = "RSA") -> str:
     return f"""export PATH="{ccrelay_ssh.REMOTE_POSIX_PATH}:$PATH"
 set -eu
 bundle={shlex.quote(directory)}
@@ -1557,6 +1566,7 @@ test -x "$java_bin" || chmod +x "$java_bin"
 export CCRELAY_PORT={port}
 export CCRELAY_DB="$bundle/center-skill.db"
 export WDSAVS_AI_HMAC_SECRET={shlex.quote(hmac_secret)}
+export CCRELAY_SSH_KEY_ALGORITHM={shlex.quote(ccrelay_identity.normalize_key_algorithm(key_algorithm))}
 export SERVER_ADDRESS=0.0.0.0
 nohup "$java_bin" -jar "$bundle/app.jar" >> "$bundle/center-runtime.log" 2>&1 < /dev/null &
 echo $! > "$bundle/center.pid"
@@ -1564,7 +1574,8 @@ printf 'CCRELAY_CENTER_STARTED|pid=%s|port=%s\n' "$!" {port}
 """
 
 
-def windows_start_script(directory: str, port: int, hmac_secret: str) -> str:
+def windows_start_script(directory: str, port: int, hmac_secret: str,
+                         key_algorithm: str = "RSA") -> str:
     def ps(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
     return f"""$ErrorActionPreference = 'Stop'
@@ -1600,6 +1611,7 @@ if (-not (Test-Path $java)) {{ throw 'Bundled Windows JRE missing' }}
 $env:CCRELAY_PORT = '{port}'
 $env:CCRELAY_DB = Join-Path $bundle 'center-skill.db'
 $env:WDSAVS_AI_HMAC_SECRET = {ps(hmac_secret)}
+$env:CCRELAY_SSH_KEY_ALGORITHM = {ps(ccrelay_identity.normalize_key_algorithm(key_algorithm))}
 $env:SERVER_ADDRESS = '0.0.0.0'
 $log = Join-Path $bundle 'center-runtime.log'
 $process = Start-Process -FilePath $java -ArgumentList @('-jar', (Join-Path $bundle 'app.jar')) -WorkingDirectory $bundle -RedirectStandardOutput $log -RedirectStandardError (Join-Path $bundle 'center-error.log') -WindowStyle Hidden -PassThru

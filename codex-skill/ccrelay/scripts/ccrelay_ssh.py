@@ -27,7 +27,8 @@ DEFAULT_SSH_PORT = 22
 DEFAULT_TIMEOUT_SECONDS = 15
 SSH_ARGUMENT_MODE_DEFAULT = "DEFAULT"
 SSH_ARGUMENT_MODE_USER_PROVIDED = "USER_PROVIDED"
-DEFAULT_KEY_NAME = "id_ed25519_ccrelay"
+DEFAULT_KEY_NAME = "id_rsa_ccrelay"
+LEGACY_DEFAULT_KEY_NAME = "id_ed25519_ccrelay"
 DEFAULT_CLUSTER_FULL_MESH_THRESHOLD = 8
 REQUIRED_TOOLS = ("ssh", "scp", "ssh-keygen")
 REMOTE_POSIX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -71,6 +72,7 @@ def default_config() -> Dict[str, Any]:
             "selectionRequired": True,
             "accountMode": "EXISTING_ACCOUNT",
             "dedicatedAccountCreationAllowed": False,
+            "trustTopology": "AUTO",
             "fullMeshThreshold": DEFAULT_CLUSTER_FULL_MESH_THRESHOLD,
             "dedicatedAccount": {
                 "username": "ccrelay",
@@ -108,6 +110,7 @@ def load_config() -> Dict[str, Any]:
     has_identity = isinstance(loaded.get("clusterIdentity"), dict)
     identity = loaded_identity
     config["clusterIdentity"].update(identity)
+    config["clusterIdentity"].setdefault("trustTopology", "AUTO")
     config["clusterIdentity"].setdefault("fullMeshThreshold", DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)
     if not identity.get("targetNodes") and identity.get("managedNodes"):
         config["clusterIdentity"]["targetNodes"] = [
@@ -262,6 +265,8 @@ def masked_config_view() -> Dict[str, Any]:
             "selectionRequired": bool(identity.get("selectionRequired", False)),
             "accountMode": identity.get("accountMode", "EXISTING_ACCOUNT"),
             "dedicatedAccountCreationAllowed": bool(identity.get("dedicatedAccountCreationAllowed", False)),
+            "trustTopology": identity.get("trustTopology", "AUTO"),
+            "effectiveTrustTopology": identity.get("effectiveTrustTopology"),
             "fullMeshThreshold": int(identity.get("fullMeshThreshold", DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)),
             "dedicatedAccount": {
                 "username": dedicated.get("username", "ccrelay"),
@@ -697,7 +702,7 @@ def ensure_local_key() -> Path:
         _restrict_file(key_path)
         return key_path
     key_path.parent.mkdir(parents=True, exist_ok=True)
-    command = [tools["tools"]["ssh-keygen"], "-t", "ed25519", "-N", "", "-f", str(key_path), "-C", "ccrelay-cluster"]
+    command = [tools["tools"]["ssh-keygen"], "-t", "rsa", "-b", "3072", "-N", "", "-f", str(key_path), "-C", "ccrelay-cluster"]
     completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     if completed.returncode != 0:
         raise SshCredentialError(f"生成 SSH 密钥失败: {_summary(completed.stderr or completed.stdout)}")
@@ -709,7 +714,12 @@ def configured_key_path() -> Path:
     configured = os.getenv("CCRELAY_SSH_KEY")
     if configured:
         return Path(configured).expanduser().resolve()
-    return config_path().parent / "keys" / DEFAULT_KEY_NAME
+    key_directory = config_path().parent / "keys"
+    preferred = key_directory / DEFAULT_KEY_NAME
+    legacy = key_directory / LEGACY_DEFAULT_KEY_NAME
+    if preferred.is_file() or not legacy.is_file():
+        return preferred
+    return legacy
 
 
 def credential_key_path(credential: Optional[Dict[str, Any]]) -> Path:

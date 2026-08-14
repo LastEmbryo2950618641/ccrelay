@@ -5,6 +5,12 @@ description: 操作独立的 CC Relay 标准 Skill 运行时，用于远端 rela
 
 # CC Relay 标准 Skill 运行时
 
+## 部署架构与失败兜底
+
+- 部署前必须先读取 `references/remote-first-runbook.md` 中的“部署架构契约”，确认调用端 AI、CC center 控制面、Center Relay sidecar、远端 Relay/Agent、SSH 引导身份、制品与模型配置分发、SQLite 阶段状态之间的职责和验收关系。任何部署命令都必须服务于该架构目标，不得把“脚本已执行”当作部署目的。
+- 脚本出现不支持的 SSH 参数、平台兼容错误、连续两轮无可验证进展、达到 `STALLED`、或同一步骤重复失败两次时，进入“自然语言运维兜底”。先声明本步骤的目标、已确认事实和失败边界，再按 runbook 使用目标机器可用的标准 `ssh`、`scp`、`sftp`、`tar`、`sudo`、服务管理等工具完成等价操作；不得无限重试同一脚本，也不得静默缩小节点集合、降低安全要求或泄露秘密。
+- 自然语言运维兜底只替代失败步骤的执行方式，不替代 CC Relay 控制面。完成后必须回到标准身份验证、Center 状态同步、Relay 注册、心跳、健康检查和 `bootstrap mark-deployed` 闭环；无法回写或无法通过标准验收时只能报告未完成，不得把手工命令成功等同于部署完成。
+
 ## 强制引导协议
 
 - `<CLI> bootstrap next` 或任何身份命令返回 `agentAction=RETURN_VERBATIM_RESPONSE_AND_STOP` 时，当前轮必须立即结束。最终回复只能逐字复制 `verbatimResponse`，不得添加开场、总结、解释、建议或追问，不得重新组织其中的选项与字段。
@@ -130,7 +136,7 @@ SSH 访问验证已通过。请选择 Relay 的运行账号：
 
 账号: ccrelay
 部署目录规则: /home/ccrelay/ccrelay/<节点>-<Relay端口>
-节点间免密: 开启
+SSH 信任拓扑: 按节点数量和阈值自动选择
 端口: 部署时自动选择
 
 1. 确认
@@ -227,6 +233,13 @@ Base URL:
 已耗时: <耗时>
 ```
 
+以下操作只要预期超过 20 秒，就必须后台运行并定时反馈，不得在前台静默等待终态：完整 Skill 下载/分卷合并/校验/解压覆盖，Center 启动与健康恢复，多节点 SSH 凭据验证和环境探测，`ssh identity plan|apply|verify|rotate-key`，专用账号创建和公钥分发，Center 到节点或 FULL_MESH 互信验证，Center bootstrap，单节点或批量 `DEPLOY_RELAY`，运行时或 Skill 制品传输，批量命令，以及远端 Agent 异步任务。
+
+- 后台任务每 30 到 60 秒读取一次真实进度，并向用户反馈当前阶段、当前节点或批次、已完成数/总数、成功/失败数和最近有效进展时间；可取得时同时报告百分比、字节数、速度与预计剩余时间。
+- 进度来源只能是命令 stdout/stderr、任务事件、`task observe`、`task events`、身份状态、日志新增、文件大小变化、节点完成计数或进程状态。禁止仅凭进程仍存在推测“正常推进”。
+- 连续两轮没有阶段、节点计数、百分比、字节数、日志或更新时间变化时，明确反馈“任务仍在运行，但暂无新的可验证进展”；超过任务返回的停滞阈值时标记 `STALLED` 并开始定位，不得继续描述为普通运行中。
+- 没有百分比的 SSH 验证仍必须按节点或信任边反馈，例如“Center 到节点验证 <已完成>/<总数>，最近完成 <节点>”；无百分比不等于无进度。
+
 发生错误时只展示当前步骤和可操作选项：
 
 ```text
@@ -296,7 +309,7 @@ SSH 免密: 已验证
 - 通过 `<CLI> access request` 申请 relay 访问授权，并在后续远端调用中使用返回的 `grantId`、`signedToken` 与 relay 上下文。
 - 目标节点已经注册且心跳健康时，优先直连远端 relay。
 - 常规远端协作优先使用 `<CLI> agent run`、`<CLI> agent fanout`、`<CLI> agent task-create` 与 `<CLI> agent task-events`。
-- 面向中小规模集群的批量 Relay 部署使用 `<CLI> task create-batch --target-node-ids <nodeA:relayPort,nodeB:relayPort> --concurrency <n>`；目标会去重，共享一次真实部署会话，按并发上限创建独立 `DEPLOY_RELAY` 子任务，单目标失败隔离，结果按输入顺序返回。它只提交任务，不等待终态，后续用 `<CLI> task observe --task-ids <taskId,...>` 或逐个 `task events` 监控。该入口是现有单目标部署的 CLI 批量包装，不代表完整 P7 动态源池/波次调度。
+- 面向中小规模集群的批量 Relay 部署使用 `<CLI> task create-batch --target-node-ids <nodeA:relayPort,nodeB:relayPort> --concurrency <n>`；目标会去重，共享一次真实部署会话，CLI 将批次 ID 和并发上限写入每个独立 `DEPLOY_RELAY` 子任务，服务端据此约束真实制品传输与安装并发。排队节点显示 `WAITING_BATCH_SLOT`，单目标失败隔离，结果按输入顺序返回。它只提交任务，不等待终态，后续用 `<CLI> task observe --task-ids <taskId,...>` 或逐个 `task events` 监控。该入口不代表完整 P7 动态源池/波次调度。
 - 低层 A2A 调试才使用 `<CLI> a2a message-send` 与 `<CLI> a2a task-create|get|events|cancel`。
 - 目标 relay 不可用时，通过 `<CLI> task create` 创建 `DEPLOY_RELAY` 任务，并设置 `deployMode=SELF_REPLICATE` 与 `enableCenterFallback=true`，让运行时先尝试源端自复制，最后才走中心 SSH 兜底。部署属于已有用户会话时传入该真实 `sessionId`；独立引导部署没有会话时省略 `--session-id`，由 CLI 自动执行 `session open` 并使用 Center 返回值。禁止构造 `bootstrap-default` 或其他未由 Center 返回的会话 ID。
 - `task create` 必须依据当前已解析中心自动向 `SELF_REPLICATE` payload 注入注册、心跳和授权校验上下文；主 AI 不手工拼写或向用户展示内部中心端点。
@@ -310,6 +323,11 @@ SSH 免密: 已验证
 - 凭据输入必须按宿主能力选择：当前有 TTY 时使用 `getpass` 隐藏输入；宿主 GUI 能拉起终端时，向用户提供 Skill 内包装命令，让用户在新终端隐藏输入后回到当前会话继续；没有 GUI/TTY 时仍优先提供该终端命令。只有用户明确选择风险后，才允许使用“直接填写账号密码”的手工兜底，且密码只能通过进程级环境变量或临时文件传给 CLI，绝不能拼进命令行、日志或回复。
 - SSH 引导账号与 relay 长期运行账号分离。首次配置严格按“凭据填写 → 全部节点只读验证 → 账号模式选择并立即执行 `ssh identity select` 保存 → 专用账号和目录确认 → apply”执行；凭据未验证完成前不得展示或接受账号模式配置。
 - SSH 参数来源必须可配置。凭据命令使用 `--ssh-arguments-mode DEFAULT|USER_PROVIDED`；默认模式使用兼容 OpenSSH 7.4 的 Skill 参数（包括 `StrictHostKeyChecking=no`），`USER_PROVIDED` 模式只使用用户重复传入的 `--ssh-argument`，不再叠加 Skill 的连接、HostKey、BatchMode 或认证参数，只保留目标端口、地址和必要的密钥传递。若用户已有更严格的 SSH 策略，必须选择用户参数模式并自行提供参数。
+- SSH 身份密钥算法使用 `--key-algorithm AUTO|ED25519|RSA`。`AUTO` 在 `identity plan` 中读取全部目标节点有效的 `PubkeyAcceptedAlgorithms`：全部明确支持 `ssh-ed25519` 时选择 ED25519，否则保守选择 RSA 3072；用户可显式指定算法。显式算法与任一节点不兼容时必须在 plan 阶段停止并列出节点，不得先创建账号再等待认证失败。
+- 本机首次初始化通用免密密钥发生在集群能力探测之前，因此新密钥默认使用兼容性更广的 RSA 3072；用户已有私钥、SSH config 或 Agent 密钥保持原样复用。集群专用密钥和 Center 管理密钥使用身份计划选出的算法。已有集群密钥不会因升级或普通 apply 自动轮换；切换算法必须显式执行 `ssh identity rotate-key --key-algorithm <算法>`。
+- 专用账号模式与 SSH 信任拓扑相互独立。`trustTopology=AUTO` 按当前完整 active 节点数和可配置的 `fullMeshThreshold` 动态解析：节点数超过阈值使用 `CENTER_ONLY`，否则使用 `FULL_MESH`；不得写死某个节点数。`CENTER_ONLY` 仍可在所有节点创建专用账号，但只验证 Center 到其他节点，不生成或验证节点间全互信边。
+- `identity apply` 已对最终 Center、完整 active 节点集合和解析后的拓扑完成验证时，保存脱敏验证快照；后续同一 Center 启动后的 SQLite 同步直接复用该快照，不重复 SSH 验证。Center、节点集合、账号模式或拓扑任一变化时快照立即失效并重新验证。
+- `CENTER_ONLY` 只允许 Center 专用账号持有集群私钥；普通节点仅安装公钥，并清理 Skill 受管专用账号目录中的历史集群私钥。Center 到多节点验证必须复用一次外层 Center SSH，再由 Center 按 `--concurrency` 并发执行；批量脚本失败时才逐节点回退诊断。
 - SSH 多节点引导统一使用 `--concurrency <n>` 控制最大并发，默认 `4`、范围 `1-32`。未显式指定时不得退回逐节点串行；节点探测、账号或公钥安装、Center 到节点验证，以及专用账号 FULL_MESH 信任边验证都受同一上限约束。单节点内部步骤保持顺序，结果按输入顺序展示，单节点失败不得取消其他节点。
 - 用户首次确认部署范围并执行 `bootstrap next --node ...` 时，CLI 必须立即把完整节点集合持久化为 `targetNodes`，即使 SSH 凭据尚未配置。后续 `ssh identity plan|select|apply|verify|rotate-key` 与 `center plan|bootstrap` 默认复用完整 active 目标集合；再次只传部分 `--node` 不得缩小集群。失败节点保留在目标集合并记录为 `failedNodes`；只有用户显式执行 `ssh identity targets exclude --node ... --confirm true` 才能移除。
 - 账号创建、密钥安装、互信验证或 Relay 资源包部署出现部分失败时，必须等待同批其他节点完成当前阶段，再按节点汇总失败阶段、失败类型和可理解摘要。不得自动治理、自动重试或自动排除；统一返回 `PARTIAL_FAILURE_REQUIRES_DECISION`，只允许用户选择“根据失败原因处理失败节点”“放弃失败节点，仅使用成功节点”或“取消”。

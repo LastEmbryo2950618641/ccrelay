@@ -591,8 +591,21 @@ def add_identity_target_options(parser: argparse.ArgumentParser, require_center:
                         help="受管节点，格式 host:port[=username]；可重复传入或使用逗号分隔")
     parser.add_argument("--allow-create", type=parse_bool,
                         help="是否允许创建 Skill 专用账号；未提供时使用本地已保存策略")
+    parser.add_argument(
+        "--trust-topology",
+        choices=["AUTO", "CENTER_ONLY", "FULL_MESH"],
+        default=None,
+        help="SSH 信任拓扑；AUTO 在目标节点数超过阈值时使用 CENTER_ONLY，否则使用 FULL_MESH。",
+    )
     parser.add_argument("--dedicated-username", default=None)
     parser.add_argument("--remote-directory-template", default=None)
+    parser.add_argument(
+        "--key-algorithm",
+        type=ccrelay_identity.normalize_key_algorithm,
+        choices=["AUTO", "ED25519", "RSA"],
+        default=None,
+        help="集群 SSH 密钥算法；AUTO 根据全部目标节点能力选择，默认复用已保存策略或 AUTO。",
+    )
     parser.add_argument("--confirm-details", type=parse_bool, default=False,
                         help="确认专用账号名和部署目录预览后才允许继续")
     parser.add_argument("--operator-id", default=os.getenv("USERNAME") or os.getenv("USER"))
@@ -1084,8 +1097,20 @@ def sync_identity_to_selected_center(args: argparse.Namespace, planned: Dict[str
     selected = planned.get("selected") or {}
     center_node = f"{selected.get('host')}:{selected.get('port') or 22}"
     allow_create = bool(identity.get("dedicatedAccountCreationAllowed", False))
+    trust_topology = resolve_identity_topology(args, allow_create, config)
     dedicated_username = (identity.get("dedicatedAccount") or {}).get("username") or ccrelay_identity.DEFAULT_DEDICATED_USERNAME
-    state = ccrelay_identity.verify(
+    expected_nodes = ccrelay_identity.normalize_nodes(node_values)
+    snapshot = identity.get("verifiedSnapshot") or {}
+    snapshot_nodes = {item.get("nodeKey") for item in snapshot.get("nodes") or [] if item.get("nodeKey")}
+    expected_node_keys = {item.get("nodeKey") for item in expected_nodes if item.get("nodeKey")}
+    snapshot_reused = bool(snapshot) and all([
+        snapshot.get("centerNodeId") == ccrelay_identity.parse_node(center_node)["nodeKey"],
+        snapshot.get("trustTopology") == trust_topology,
+        bool(snapshot.get("dedicatedAccountCreationAllowed")) == allow_create,
+        snapshot_nodes == expected_node_keys,
+        snapshot.get("centerToNodeStatus") == "READY",
+    ])
+    state = snapshot if snapshot_reused else ccrelay_identity.verify(
         getattr(args, "cluster_id", "default"),
         center_node,
         ccrelay_identity.normalize_nodes(node_values, center_node),
@@ -1093,12 +1118,15 @@ def sync_identity_to_selected_center(args: argparse.Namespace, planned: Dict[str
         dedicated_username,
         max(15, int(getattr(args, "connect_timeout", 15))),
         concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
-        expected_target_nodes=ccrelay_identity.normalize_nodes(node_values),
+        expected_target_nodes=expected_nodes,
+        key_algorithm=resolve_identity_key_algorithm(args, config),
+        trust_topology=trust_topology,
     )
     if state.get("centerToNodeStatus") != "READY":
         raise CliError("远端中心切换后 SSH 身份验证未达到 READY")
     persistence = persist_identity_state(args, state, "CENTER_SWITCH")
-    return {"status": "READY", "capability": state.get("effectiveCapability"), "persistence": persistence}
+    return {"status": "READY", "capability": state.get("effectiveCapability"),
+            "snapshotReused": snapshot_reused, "persistence": persistence}
 
 
 def _ensure_local_center(args: argparse.Namespace) -> Dict[str, Any]:
@@ -1121,6 +1149,8 @@ def _ensure_local_center(args: argparse.Namespace) -> Dict[str, Any]:
     environment["CCRELAY_PORT"] = str(port)
     environment["CCRELAY_DB"] = str(db_path)
     environment["WDSAVS_AI_HMAC_SECRET"] = _center_hmac_secret(create=True)
+    environment["CCRELAY_SSH_KEY_ALGORITHM"] = resolve_effective_center_key_algorithm(
+        args, ccrelay_ssh.load_config())
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     process = None
     try:
@@ -1758,6 +1788,9 @@ def bootstrap_mark_deployed(args: argparse.Namespace) -> Any:
 
 def identity_capability_is_ready(state: Dict[str, Any]) -> bool:
     capability = state.get("effectiveCapability")
+    topology = state.get("trustTopology")
+    if topology == "CENTER_ONLY":
+        return capability in {"CENTER_ONLY", "FULL_MESH"}
     if state.get("dedicatedAccountCreationAllowed"):
         return capability == "FULL_MESH"
     return capability in {"CENTER_ONLY", "FULL_MESH"}
@@ -1865,6 +1898,7 @@ def ssh_identity_plan(args: argparse.Namespace) -> Any:
         args.connect_timeout,
         directory_template,
         getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
+        resolve_identity_key_algorithm(args, config),
     )
 
 
@@ -1903,6 +1937,8 @@ def ssh_identity_apply(args: argparse.Namespace) -> Any:
         args.connect_timeout,
         remote_directory_template=directory_template,
         concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
+        key_algorithm=resolve_identity_key_algorithm(args, config),
+        trust_topology=resolve_identity_topology(args, allow_create, config),
     )
     result["bootstrapExecutionMode"] = execution_mode
     if result.get("effectiveCapability"):
@@ -1946,6 +1982,8 @@ def ssh_identity_verify(args: argparse.Namespace) -> Any:
         args.connect_timeout,
         concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
         expected_target_nodes=ccrelay_identity.normalize_nodes(args.nodes),
+        key_algorithm=resolve_identity_key_algorithm(args, config),
+        trust_topology=resolve_identity_topology(args, allow_create, config),
     )
     ccrelay_identity.persist_identity_outcome(result)
     result["persistence"] = persist_identity_state(args, result, "VERIFY")
@@ -1977,6 +2015,9 @@ def ssh_identity_select_mode(args: argparse.Namespace) -> Any:
         "selectionRequired": False,
         "accountMode": "DEDICATED_PENDING" if allow_create else "EXISTING_ACCOUNT",
         "dedicatedAccountCreationAllowed": allow_create,
+        "trustTopology": str(
+            getattr(args, "trust_topology", None) or identity.get("trustTopology") or "AUTO"
+        ).strip().upper(),
     })
     dedicated = identity.setdefault("dedicatedAccount", {})
     dedicated.update({
@@ -1984,6 +2025,7 @@ def ssh_identity_select_mode(args: argparse.Namespace) -> Any:
         "status": "PENDING" if allow_create else "DISABLED",
         "detailsConfirmed": bool(args.confirm_details) if allow_create else False,
     })
+    dedicated["keyAlgorithm"] = resolve_identity_key_algorithm(args, config)
     config.setdefault("runtime", {})["remoteDirectoryTemplate"] = directory_template
     ccrelay_ssh.save_config(config)
     if allow_create and not args.confirm_details:
@@ -2025,6 +2067,8 @@ def ssh_identity_rotate_key(args: argparse.Namespace) -> Any:
         rotate_key=True,
         remote_directory_template=directory_template,
         concurrency=getattr(args, "concurrency", ccrelay_identity.DEFAULT_SSH_CONCURRENCY),
+        key_algorithm=resolve_identity_key_algorithm(args, config),
+        trust_topology=resolve_identity_topology(args, allow_create, config),
     )
     if result.get("effectiveCapability"):
         result["persistence"] = persist_identity_state(args, result, "ROTATE_KEY")
@@ -2036,15 +2080,29 @@ def resolve_identity_mode(args: argparse.Namespace) -> Optional[bool]:
         return bool(args.allow_create)
     config = ccrelay_ssh.load_config()
     identity = config.get("clusterIdentity") or {}
-    threshold = max(1, int(identity.get("fullMeshThreshold", ccrelay_ssh.DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)))
-    target_count = len(getattr(args, "nodes", []) or identity.get("targetNodes") or [])
-    if target_count > threshold:
-        return False
     if bool(identity.get("selectionRequired", False)):
         return None
     if "dedicatedAccountCreationAllowed" in identity:
         return bool(identity.get("dedicatedAccountCreationAllowed"))
     return None
+
+
+def resolve_identity_topology(args: argparse.Namespace, allow_create: bool,
+                              config: Optional[Dict[str, Any]] = None) -> str:
+    if not allow_create:
+        return "CENTER_ONLY"
+    resolved_config = config if config is not None else ccrelay_ssh.load_config()
+    identity = resolved_config.get("clusterIdentity") or {}
+    requested = getattr(args, "trust_topology", None) or identity.get("trustTopology") or "AUTO"
+    normalized = str(requested).strip().upper()
+    if normalized in {"CENTER_ONLY", "FULL_MESH"}:
+        return normalized
+    if normalized != "AUTO":
+        raise CliError("--trust-topology 必须是 AUTO、CENTER_ONLY 或 FULL_MESH")
+    threshold = max(1, int(identity.get(
+        "fullMeshThreshold", ccrelay_ssh.DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)))
+    target_count = len(getattr(args, "nodes", []) or identity.get("targetNodes") or [])
+    return "CENTER_ONLY" if target_count > threshold else "FULL_MESH"
 
 
 def identity_interaction_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2087,7 +2145,7 @@ def render_identity_interaction(payload: Dict[str, Any]) -> str:
             "",
             f"账号: {summary.get('dedicatedUsername') or 'ccrelay'}",
             "部署目录: 按节点和 Relay 端口自动生成",
-            "节点间免密: 开启",
+            "SSH 信任拓扑: 按节点数量和阈值自动选择",
             "端口: 部署时自动选择",
             "",
         ]
@@ -2302,6 +2360,20 @@ def resolve_identity_details(args: argparse.Namespace, config: Dict[str, Any]) -
     )
 
 
+def resolve_identity_key_algorithm(args: argparse.Namespace, config: Dict[str, Any]) -> str:
+    dedicated = (config.get("clusterIdentity") or {}).get("dedicatedAccount") or {}
+    value = (getattr(args, "key_algorithm", None) or dedicated.get("keyAlgorithm")
+             or ccrelay_identity.DEFAULT_KEY_ALGORITHM)
+    return ccrelay_identity.normalize_key_algorithm(value)
+
+
+def resolve_effective_center_key_algorithm(args: argparse.Namespace, config: Dict[str, Any]) -> str:
+    dedicated = (config.get("clusterIdentity") or {}).get("dedicatedAccount") or {}
+    cluster_key = dedicated.get("clusterKey") or {}
+    value = cluster_key.get("algorithm") or resolve_identity_key_algorithm(args, config)
+    return ccrelay_identity.normalize_key_algorithm(value)
+
+
 def identity_details_confirmation_required(args: argparse.Namespace, config: Dict[str, Any],
                                            dedicated_username: str, directory_template: str) -> bool:
     if args.confirm_details:
@@ -2357,8 +2429,12 @@ def identity_policy_summary(config: Dict[str, Any]) -> Dict[str, Any]:
         "configured": not bool(identity.get("selectionRequired", True)),
         "accountMode": identity.get("accountMode", "EXISTING_ACCOUNT"),
         "dedicatedAccountCreationAllowed": bool(identity.get("dedicatedAccountCreationAllowed", False)),
+        "trustTopology": identity.get("trustTopology", "AUTO"),
+        "effectiveTrustTopology": identity.get("effectiveTrustTopology"),
         "fullMeshThreshold": int(identity.get("fullMeshThreshold", ccrelay_ssh.DEFAULT_CLUSTER_FULL_MESH_THRESHOLD)),
         "dedicatedUsername": dedicated.get("username", ccrelay_identity.DEFAULT_DEDICATED_USERNAME),
+        "keyAlgorithm": dedicated.get("keyAlgorithm") or (dedicated.get("clusterKey") or {}).get("algorithm")
+        or ccrelay_identity.DEFAULT_KEY_ALGORITHM,
         "detailsConfirmed": bool(dedicated.get("detailsConfirmed", False)),
     }
 
@@ -2735,6 +2811,8 @@ def task_create_batch(args: argparse.Namespace) -> Any:
     prepared: List[Dict[str, Any]] = []
     for index, target_node_id in enumerate(target_node_ids):
         payload = copy.deepcopy(payload_template)
+        payload["deploymentBatchId"] = batch_id
+        payload["deploymentBatchConcurrency"] = concurrency
         child_args = argparse.Namespace(**vars(args))
         child_args.target_node_id = target_node_id
         enrich_deploy_payload(child_args, payload)

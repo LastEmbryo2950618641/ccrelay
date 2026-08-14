@@ -3,6 +3,7 @@ package com.webank.wedatasphere.wdsavs.aiagent.service;
 import com.webank.wedatasphere.wdsavs.aiagent.model.CenterSshPreflightRequest;
 import com.webank.wedatasphere.wdsavs.aiagent.model.CenterSshPreflightResponse;
 import com.webank.wedatasphere.wdsavs.aiagent.model.CenterSshPublicKeyView;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -19,7 +20,12 @@ import java.util.concurrent.TimeUnit;
 public class CenterSshAccessServiceImpl implements CenterSshAccessService {
 
     private static final long DEFAULT_TIMEOUT_MS = 15_000L;
-    private static final List<String> KEY_NAMES = List.of("id_ed25519", "id_rsa", "id_ecdsa");
+    private final String keyAlgorithm;
+
+    public CenterSshAccessServiceImpl(
+            @Value("${wdsavs.ai.ssh.center-key-algorithm:${CCRELAY_SSH_KEY_ALGORITHM:AUTO}}") String keyAlgorithm) {
+        this.keyAlgorithm = normalizeKeyAlgorithm(keyAlgorithm);
+    }
 
     @Override
     public CenterSshPublicKeyView getPublicKey() {
@@ -79,17 +85,21 @@ public class CenterSshAccessServiceImpl implements CenterSshAccessService {
 
     Path ensureCenterKey() {
         Path sshDirectory = Path.of(System.getProperty("user.home"), ".ssh");
-        for (String keyName : KEY_NAMES) {
+        for (String keyName : keyNames()) {
             Path existing = sshDirectory.resolve(keyName);
             if (Files.isRegularFile(existing) && Files.isRegularFile(Path.of(existing + ".pub"))) {
                 return existing;
             }
         }
-        Path generated = sshDirectory.resolve("id_ed25519");
+        String generatedName = "RSA".equals(keyAlgorithm) ? "id_rsa" : "id_ed25519";
+        Path generated = sshDirectory.resolve(generatedName);
         try {
             Files.createDirectories(sshDirectory);
-            Process process = new ProcessBuilder(
-                    sshKeygenCommand(), "-q", "-t", "ed25519", "-N", "", "-f", generated.toString(), "-C", "ccrelay-center")
+            List<String> command = new ArrayList<>();
+            command.add(sshKeygenCommand());
+            command.addAll(keygenArguments());
+            command.addAll(List.of("-N", "", "-f", generated.toString(), "-C", "ccrelay-center"));
+            Process process = new ProcessBuilder(command)
                     .redirectErrorStream(true)
                     .start();
             boolean completed = process.waitFor(30, TimeUnit.SECONDS);
@@ -105,6 +115,31 @@ public class CenterSshAccessServiceImpl implements CenterSshAccessService {
         } catch (Exception e) {
             throw new IllegalStateException("Failed to create center SSH key", e);
         }
+    }
+
+    String keyAlgorithm() {
+        return keyAlgorithm;
+    }
+
+    List<String> keyNames() {
+        return List.of("ED25519".equals(keyAlgorithm) ? "id_ed25519" : "id_rsa");
+    }
+
+    List<String> keygenArguments() {
+        return "ED25519".equals(keyAlgorithm)
+                ? List.of("-q", "-t", "ed25519")
+                : List.of("-q", "-t", "rsa", "-b", "3072");
+    }
+
+    private String normalizeKeyAlgorithm(String value) {
+        String normalized = value == null ? "AUTO" : value.trim().toUpperCase();
+        if ("AUTO".equals(normalized) || "RSA".equals(normalized)) {
+            return "RSA";
+        }
+        if ("ED25519".equals(normalized) || "SSH-ED25519".equals(normalized)) {
+            return "ED25519";
+        }
+        throw new IllegalArgumentException("wdsavs.ai.ssh.center-key-algorithm must be AUTO, ED25519, or RSA");
     }
 
     private CenterSshPreflightResponse response(boolean success, String status, String failureType, String summary,

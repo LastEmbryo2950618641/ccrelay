@@ -699,6 +699,86 @@ class CcRelayCliTest(unittest.TestCase):
         )
         self.assertEqual(2, peak)
 
+    def test_cluster_above_threshold_center_only_skips_full_mesh_edges(self):
+        threshold = ccrelay_ssh.DEFAULT_CLUSTER_FULL_MESH_THRESHOLD
+        node_count = threshold + 1
+        nodes = [
+            {
+                "host": f"192.0.2.{index}", "port": 22,
+                "nodeKey": f"192.0.2.{index}:22", "bootstrapUsername": "tester",
+                "runtimeUsername": "ccrelay", "accountStatus": "ACTIVE",
+                "privilegeSummary": {"shPath": "/bin/sh", "sshPath": "/usr/bin/ssh"},
+            }
+            for index in range(1, node_count + 1)
+        ]
+        calls = []
+
+        def run_command(host, _port, _username, command, _timeout, **_kwargs):
+            calls.append((host, command))
+            output = "\n".join(
+                f"CCRELAY_CENTER_VERIFY|{node['nodeKey']}|READY|0"
+                for node in nodes if node["nodeKey"] != "192.0.2.1:22"
+            )
+            return {"success": True, "latencyMs": 1, "summary": "", "stdout": output}
+
+        with patch.object(ccrelay_identity, "ensure_cluster_key", return_value=Path("cluster-key")), \
+                patch.object(ccrelay_ssh, "ssh_arguments_for", return_value=[]), \
+                patch.object(ccrelay_ssh, "run_authenticated_command", side_effect=run_command):
+            result = ccrelay_identity.verify(
+                "default", "192.0.2.1:22", nodes, True, "ccrelay", 10,
+                "SHA256:test", "CENTER_ONLY_SHARED_KEYPAIR", concurrency=8,
+                trust_topology="CENTER_ONLY")
+
+        self.assertEqual("CENTER_ONLY", result["trustTopology"])
+        self.assertEqual("CENTER_ONLY", result["effectiveCapability"])
+        self.assertEqual("NOT_REQUIRED", result["nodeToNodeStatus"])
+        self.assertEqual(node_count, result["verifiedNodeCount"])
+        self.assertEqual(0, result["expectedTrustEdgeCount"])
+        self.assertEqual([], result["trustEdges"])
+        self.assertEqual(1, len(calls))
+
+    def test_center_only_failed_batch_diagnostics_respect_concurrency(self):
+        nodes = [
+            {
+                "host": f"192.0.2.{index}", "port": 22,
+                "nodeKey": f"192.0.2.{index}:22", "bootstrapUsername": "tester",
+                "runtimeUsername": "ccrelay", "accountStatus": "ACTIVE",
+                "privilegeSummary": {"shPath": "/bin/sh", "sshPath": "/usr/bin/ssh"},
+            }
+            for index in range(1, 7)
+        ]
+        lock = threading.Lock()
+        running = 0
+        peak = 0
+        calls = []
+
+        def run_command(host, _port, _username, command, _timeout, **_kwargs):
+            nonlocal running, peak
+            calls.append((host, command))
+            if _kwargs.get("stdin_text"):
+                return {"success": True, "latencyMs": 1, "summary": "", "stdout": ""}
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            try:
+                time.sleep(0.02)
+                return {"success": False, "latencyMs": 20, "summary": "simulated failure"}
+            finally:
+                with lock:
+                    running -= 1
+
+        with patch.object(ccrelay_identity, "ensure_cluster_key", return_value=Path("cluster-key")), \
+                patch.object(ccrelay_ssh, "ssh_arguments_for", return_value=[]), \
+                patch.object(ccrelay_ssh, "run_authenticated_command", side_effect=run_command):
+            result = ccrelay_identity.verify(
+                "default", "192.0.2.1:22", nodes, True, "ccrelay", 10,
+                "SHA256:test", "CENTER_ONLY_SHARED_KEYPAIR", concurrency=2,
+                trust_topology="CENTER_ONLY")
+
+        self.assertEqual("DEGRADED", result["effectiveCapability"])
+        self.assertEqual(2, peak)
+        self.assertEqual(6, len(calls))
+
     def test_persisted_multi_node_scope_cannot_be_full_mesh_from_one_node_result(self):
         config = ccrelay_ssh.default_config()
         config["clusterIdentity"]["targetNodes"] = [
@@ -826,6 +906,11 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertTrue(ccrelay_cli.identity_capability_is_ready({
             "dedicatedAccountCreationAllowed": True,
             "effectiveCapability": "FULL_MESH",
+        }))
+        self.assertTrue(ccrelay_cli.identity_capability_is_ready({
+            "dedicatedAccountCreationAllowed": True,
+            "trustTopology": "CENTER_ONLY",
+            "effectiveCapability": "CENTER_ONLY",
         }))
 
     def test_identity_partial_failure_requires_user_decision(self):
@@ -1347,7 +1432,7 @@ class CcRelayCliTest(unittest.TestCase):
             "即将创建以下专用账号：\n\n"
             "账号: ccrelay\n"
             "部署目录: 按节点和 Relay 端口自动生成\n"
-            "节点间免密: 开启\n"
+            "SSH 信任拓扑: 按节点数量和阈值自动选择\n"
             "端口: 部署时自动选择\n\n"
             "1. 确认\n"
             "2. 修改账号或目录\n"
@@ -1421,10 +1506,11 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertFalse(RecordingHandler.records)
 
 
-    def test_resolve_identity_mode_defaults_to_center_only_when_target_count_exceeds_threshold(self):
+    def test_cluster_above_threshold_keeps_selected_dedicated_account_mode(self):
         config = {
             "clusterIdentity": {
-                "selectionRequired": True,
+                "selectionRequired": False,
+                "dedicatedAccountCreationAllowed": True,
                 "fullMeshThreshold": 4,
                 "targetNodes": [
                     {"nodeKey": "192.0.2.10:22"},
@@ -1440,7 +1526,38 @@ class CcRelayCliTest(unittest.TestCase):
         with patch.object(ccrelay_cli.ccrelay_ssh, "load_config", return_value=config):
             result = ccrelay_cli.resolve_identity_mode(args)
 
-        self.assertFalse(result)
+        self.assertTrue(result)
+
+    def test_cluster_above_threshold_defaults_to_center_only_topology(self):
+        config = {
+            "clusterIdentity": {
+                "trustTopology": "AUTO",
+                "fullMeshThreshold": 4,
+                "targetNodes": [{"nodeKey": f"node-{index}:22"} for index in range(5)],
+            }
+        }
+        args = argparse.Namespace(trust_topology=None, nodes=[])
+
+        with patch.object(ccrelay_cli.ccrelay_ssh, "load_config", return_value=config):
+            result = ccrelay_cli.resolve_identity_topology(args, True)
+
+        self.assertEqual("CENTER_ONLY", result)
+
+    def test_cluster_at_threshold_defaults_to_full_mesh_topology(self):
+        threshold = 4
+        config = {
+            "clusterIdentity": {
+                "trustTopology": "AUTO",
+                "fullMeshThreshold": threshold,
+                "targetNodes": [{"nodeKey": f"node-{index}:22"} for index in range(threshold)],
+            }
+        }
+        args = argparse.Namespace(trust_topology=None, nodes=[])
+
+        with patch.object(ccrelay_cli.ccrelay_ssh, "load_config", return_value=config):
+            result = ccrelay_cli.resolve_identity_topology(args, True)
+
+        self.assertEqual("FULL_MESH", result)
 
     def test_identity_policy_summary_exposes_full_mesh_threshold(self):
         summary = ccrelay_cli.identity_policy_summary({
@@ -1546,6 +1663,226 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertRegex(password, r"[0-9]")
         self.assertRegex(password, r"[!@#%+=_-]")
         self.assertNotRegex(password, r"[:'\"\\\s]")
+
+    def test_auto_key_algorithm_falls_back_to_rsa_when_any_node_rejects_ed25519(self):
+        nodes = [
+            {"nodeKey": "legacy:22", "privilegeSummary": {
+                "pubkeyAcceptedAlgorithms": "rsa-sha2-512,rsa-sha2-256,ssh-rsa",
+            }},
+            {"nodeKey": "modern:22", "privilegeSummary": {
+                "pubkeyAcceptedAlgorithms": "ssh-ed25519,rsa-sha2-512,rsa-sha2-256",
+            }},
+        ]
+
+        selection = ccrelay_identity.select_key_algorithm("AUTO", nodes)
+
+        self.assertEqual("RSA", selection["algorithm"])
+        self.assertEqual("AUTO_COMPATIBILITY_FALLBACK", selection["source"])
+        self.assertEqual(["legacy:22"], selection["ed25519UnsupportedNodes"])
+
+    def test_auto_key_algorithm_keeps_ed25519_when_every_node_supports_it(self):
+        nodes = [
+            {"nodeKey": "node-a:22", "privilegeSummary": {
+                "pubkeyAcceptedAlgorithms": "ssh-ed25519,rsa-sha2-512,rsa-sha2-256",
+            }},
+            {"nodeKey": "node-b:22", "privilegeSummary": {
+                "pubkeyAcceptedAlgorithms": "ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-256",
+            }},
+        ]
+
+        selection = ccrelay_identity.select_key_algorithm("AUTO", nodes)
+
+        self.assertEqual("ED25519", selection["algorithm"])
+        self.assertEqual("AUTO_PREFERRED", selection["source"])
+        self.assertEqual([], selection["ed25519UnsupportedNodes"])
+
+    def test_explicit_ed25519_selection_reports_incompatible_nodes(self):
+        nodes = [{"nodeKey": "legacy:22", "privilegeSummary": {
+            "pubkeyAcceptedAlgorithms": "rsa-sha2-512,rsa-sha2-256,ssh-rsa",
+        }}]
+
+        selection = ccrelay_identity.select_key_algorithm("ED25519", nodes)
+
+        self.assertFalse(selection["compatible"])
+        self.assertEqual(["legacy:22"], selection["incompatibleNodes"])
+
+    def test_rsa_dedicated_provisioning_uses_rsa_identity_files(self):
+        script = ccrelay_identity.linux_provision_script(
+            "ccrelay",
+            "Aa1!complex-password",
+            "ssh-rsa AAAATEST cluster",
+            "PRIVATE KEY",
+            "/bin/bash",
+            "RSA",
+        )
+
+        self.assertIn('id_rsa_ccrelay_cluster', script)
+        self.assertIn('cp "$home/.ssh/id_rsa_ccrelay_cluster" "$home/.ssh/id_rsa"', script)
+        self.assertNotIn('cat > "$home/.ssh/id_ed25519_ccrelay_cluster"', script)
+
+    def test_center_only_worker_provisioning_never_contains_private_key(self):
+        private_key = "CENTER-ONLY-PRIVATE-KEY-MUST-NOT-LEAVE-CENTER"
+
+        linux_script = ccrelay_identity.linux_provision_script(
+            "ccrelay", "Aa1!complex-password", "ssh-rsa PUBLIC", private_key,
+            "/bin/sh", "RSA", install_private_key=False)
+        windows_script = ccrelay_identity.windows_provision_script(
+            "ccrelay", "Aa1!complex-password", "ssh-rsa PUBLIC", private_key,
+            "RSA", install_private_key=False)
+
+        self.assertNotIn(private_key, linux_script)
+        self.assertNotIn(private_key, windows_script)
+        self.assertIn("authorized_keys", linux_script)
+        self.assertIn("authorized_keys", windows_script)
+        self.assertIn("rm -f", linux_script)
+        self.assertIn("Remove-Item", windows_script)
+
+    def test_cluster_key_algorithm_change_does_not_reuse_incompatible_key(self):
+        config = ccrelay_ssh.default_config()
+        key_root = Path(self.temporary_directory.name) / "keys" / "default"
+        old_key = key_root / "cluster_ed25519"
+        old_key.parent.mkdir(parents=True, exist_ok=True)
+        old_key.write_text("OLD ED25519 PRIVATE", encoding="utf-8")
+        old_key.with_suffix(".pub").write_text("ssh-ed25519 OLD", encoding="utf-8")
+        config["clusterIdentity"]["dedicatedAccount"]["clusterKey"] = {
+            "algorithm": "ED25519",
+            "privateKeyPath": str(old_key),
+        }
+
+        with patch.object(ccrelay_ssh, "load_config", return_value=config), \
+                patch.object(ccrelay_ssh, "config_path", return_value=Path(self.temporary_directory.name) / "ssh.json"), \
+                patch.object(ccrelay_ssh, "check_local_tools", return_value={"tools": {"ssh-keygen": "ssh-keygen"}}), \
+                patch.object(ccrelay_ssh, "_restrict_file"), \
+                patch.object(subprocess, "run") as run:
+            def create_key(command, **_kwargs):
+                generated = Path(command[command.index("-f") + 1])
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                generated.write_text("NEW RSA PRIVATE", encoding="utf-8")
+                generated.with_suffix(".pub").write_text("ssh-rsa NEW", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            run.side_effect = create_key
+            selected = ccrelay_identity.ensure_cluster_key("default", False, "RSA")
+
+        self.assertNotEqual(old_key.resolve(), selected)
+        self.assertEqual("cluster_rsa", selected.name)
+        self.assertEqual("OLD ED25519 PRIVATE", old_key.read_text(encoding="utf-8"))
+        self.assertIn("rsa", run.call_args.args[0])
+
+    def test_center_only_apply_installs_private_key_only_on_center(self):
+        center = {
+            "host": "192.0.2.10", "port": 22, "nodeKey": "192.0.2.10:22",
+            "bootstrapUsername": "bootstrap", "osType": "LINUX",
+            "privilegeSummary": {"uid": "0", "shPath": "/bin/sh"},
+        }
+        worker = {
+            "host": "192.0.2.11", "port": 22, "nodeKey": "192.0.2.11:22",
+            "bootstrapUsername": "bootstrap", "osType": "LINUX",
+            "privilegeSummary": {"uid": "0", "shPath": "/bin/sh"},
+        }
+        planned = {
+            "status": "READY_TO_APPLY",
+            "accountMode": "DEDICATED_MANAGED",
+            "centerNodeId": center["nodeKey"],
+            "nodes": [center, worker],
+            "clusterKeySelection": {"algorithm": "RSA"},
+        }
+        verified = {
+            "trustTopology": "CENTER_ONLY",
+            "effectiveCapability": "CENTER_ONLY",
+            "centerToNodeStatus": "READY",
+            "nodeToNodeStatus": "NOT_REQUIRED",
+            "nodes": [center, worker],
+            "trustEdges": [],
+        }
+        key_path = Path(self.temporary_directory.name) / "cluster_rsa"
+        key_path.write_text("PRIVATE", encoding="utf-8")
+        key_path.with_suffix(".pub").write_text("ssh-rsa PUBLIC", encoding="utf-8")
+        installs = {}
+
+        def provision(node, *_args, **kwargs):
+            installs[node["nodeKey"]] = kwargs["install_private_key"]
+            return {"success": True}
+
+        config = ccrelay_ssh.default_config()
+        with patch.object(ccrelay_identity, "plan", return_value=planned), \
+                patch.object(ccrelay_identity, "normalize_nodes", return_value=[center, worker]), \
+                patch.object(ccrelay_identity, "ensure_cluster_key", return_value=key_path), \
+                patch.object(ccrelay_identity, "dedicated_password", return_value="Aa1!password"), \
+                patch.object(ccrelay_identity, "provision_dedicated", side_effect=provision), \
+                patch.object(ccrelay_identity, "verify", return_value=verified), \
+                patch.object(ccrelay_identity, "fingerprint", return_value="SHA256:test"), \
+                patch.object(ccrelay_identity, "persist_identity_outcome"), \
+                patch.object(ccrelay_identity, "local_status", return_value={}), \
+                patch.object(ccrelay_ssh, "load_config", return_value=config), \
+                patch.object(ccrelay_ssh, "save_config"):
+            result = ccrelay_identity.apply(
+                "default", center["nodeKey"], [center["nodeKey"], worker["nodeKey"]],
+                True, "ccrelay", 10, key_algorithm="RSA", trust_topology="CENTER_ONLY")
+
+        self.assertEqual("CENTER_ONLY", result["effectiveCapability"])
+        self.assertEqual({center["nodeKey"]: True, worker["nodeKey"]: False}, installs)
+
+    def test_identity_cli_accepts_explicit_rsa_key_algorithm(self):
+        parser = ccrelay_cli.build_parser()
+
+        args = parser.parse_args([
+            "ssh", "identity", "plan",
+            "--node", "192.0.2.10:22",
+            "--key-algorithm", "RSA",
+        ])
+
+        self.assertEqual("RSA", args.key_algorithm)
+
+    @patch.object(ccrelay_ssh, "check_local_tools", return_value={
+        "missingTools": [], "tools": {"ssh-keygen": "ssh-keygen"},
+    })
+    @patch.object(ccrelay_ssh.subprocess, "run")
+    def test_new_local_bootstrap_key_defaults_to_rsa_3072(self, run, _tools):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ""
+        run.return_value.stdout = ""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            key_path = Path(temporary_directory) / "id_ccrelay"
+            with patch.object(ccrelay_ssh, "configured_key_path", return_value=key_path):
+                ccrelay_ssh.ensure_local_key()
+
+        command = next(call.args[0] for call in run.call_args_list if "-t" in call.args[0])
+        self.assertEqual("rsa", command[command.index("-t") + 1])
+        self.assertEqual("3072", command[command.index("-b") + 1])
+
+    def test_configured_key_path_reuses_legacy_ed25519_key(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "ssh-credentials.json"
+            key_directory = config_path.parent / "keys"
+            key_directory.mkdir()
+            legacy = key_directory / ccrelay_ssh.LEGACY_DEFAULT_KEY_NAME
+            legacy.write_text("legacy", encoding="utf-8")
+            with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(config_path)}, clear=False):
+                self.assertEqual(legacy, ccrelay_ssh.configured_key_path())
+
+    @patch.object(ccrelay_identity, "parallel_map_ordered", side_effect=lambda items, operation, *_args: [operation(item) for item in items])
+    @patch.object(ccrelay_identity, "ensure_cluster_key", return_value=Path("cluster-key"))
+    def test_verify_uses_selected_cluster_key_algorithm(self, ensure_cluster_key, _parallel):
+        with patch.object(ccrelay_identity, "parse_node", return_value={
+            "host": "center", "port": 22, "nodeKey": "center:22", "username": "ccrelay",
+        }), patch.object(ccrelay_ssh, "resolve_credential", return_value=({"username": "ccrelay"}, "DEFAULT")), \
+                patch.object(ccrelay_identity, "probe_environment", return_value={
+                    "osType": "LINUX", "uid": "0", "sshPath": "ssh", "shPath": "sh",
+                }), patch.object(ccrelay_ssh, "ssh_arguments_for", return_value=[]), \
+                patch.object(ccrelay_ssh, "run_authenticated_command", return_value={"success": True}), \
+                patch.object(ccrelay_ssh, "run_key_command", return_value={"success": True}):
+            ccrelay_identity.verify(
+                "default",
+                "center:22",
+                [{"host": "center", "port": 22, "nodeKey": "center:22", "bootstrapUsername": "ccrelay"}],
+                True,
+                "ccrelay",
+                10,
+                key_algorithm="ED25519",
+            )
+
+        ensure_cluster_key.assert_called_once_with("default", False, "ED25519")
 
     def test_dedicated_password_replaces_existing_secret_that_fails_complexity_policy(self):
         with patch.dict(os.environ, {"CCRELAY_SSH_CONFIG": str(self.ssh_config_path)}):
@@ -1692,6 +2029,82 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertTrue(result["requiredBeforeDeploy"])
         self.assertEqual("ssh identity verify", result["resumeCommand"])
 
+    @patch.object(ccrelay_cli, "persist_identity_state", return_value={"status": "READY"})
+    @patch.object(ccrelay_cli.ccrelay_identity, "verify")
+    def test_center_sync_reuses_matching_verified_identity_snapshot(self, verify, persist):
+        nodes = [
+            {"host": "192.0.2.10", "port": 22, "nodeKey": "192.0.2.10:22"},
+            {"host": "192.0.2.11", "port": 22, "nodeKey": "192.0.2.11:22"},
+        ]
+        snapshot = {
+            "clusterId": "default",
+            "accountMode": "DEDICATED_MANAGED",
+            "dedicatedAccountCreationAllowed": True,
+            "dedicatedUsername": "ccrelay",
+            "trustTopology": "CENTER_ONLY",
+            "effectiveCapability": "CENTER_ONLY",
+            "centerNodeId": "192.0.2.10:22",
+            "centerToNodeStatus": "READY",
+            "nodes": [
+                {**nodes[0], "accountStatus": "ACTIVE", "centerAccessStatus": "READY"},
+                {**nodes[1], "accountStatus": "ACTIVE", "centerAccessStatus": "READY"},
+            ],
+            "trustEdges": [],
+        }
+        config = ccrelay_ssh.default_config()
+        config["clusterIdentity"].update({
+            "selectionRequired": False,
+            "accountMode": "DEDICATED_MANAGED",
+            "dedicatedAccountCreationAllowed": True,
+            "trustTopology": "AUTO",
+            "fullMeshThreshold": 1,
+            "targetNodes": nodes,
+            "verifiedSnapshot": snapshot,
+        })
+        args = argparse.Namespace(
+            cluster_id="default", connect_timeout=15, concurrency=4,
+            trust_topology=None, key_algorithm=None, operator_id="tester",
+        )
+        planned = {"selected": {"host": "192.0.2.10", "port": 22}}
+
+        with patch.object(ccrelay_cli.ccrelay_ssh, "load_config", return_value=config):
+            result = ccrelay_cli.sync_identity_to_selected_center(args, planned)
+
+        verify.assert_not_called()
+        persist.assert_called_once_with(args, snapshot, "CENTER_SWITCH")
+        self.assertTrue(result["snapshotReused"])
+
+    @patch.object(ccrelay_cli, "persist_identity_state", return_value={"status": "READY"})
+    @patch.object(ccrelay_cli.ccrelay_identity, "verify", return_value={
+        "centerToNodeStatus": "READY", "effectiveCapability": "CENTER_ONLY",
+    })
+    def test_center_sync_reverifies_when_snapshot_center_changes(self, verify, _persist):
+        config = ccrelay_ssh.default_config()
+        config["clusterIdentity"].update({
+            "selectionRequired": False,
+            "dedicatedAccountCreationAllowed": False,
+            "trustTopology": "AUTO",
+            "targetNodes": [{"host": "192.0.2.10", "port": 22, "nodeKey": "192.0.2.10:22"}],
+            "verifiedSnapshot": {
+                "centerNodeId": "192.0.2.99:22",
+                "trustTopology": "CENTER_ONLY",
+                "dedicatedAccountCreationAllowed": False,
+                "centerToNodeStatus": "READY",
+                "nodes": [{"nodeKey": "192.0.2.10:22"}],
+            },
+        })
+        args = argparse.Namespace(
+            cluster_id="default", connect_timeout=15, concurrency=4,
+            trust_topology=None, key_algorithm=None, operator_id="tester",
+        )
+
+        with patch.object(ccrelay_cli.ccrelay_ssh, "load_config", return_value=config):
+            result = ccrelay_cli.sync_identity_to_selected_center(
+                args, {"selected": {"host": "192.0.2.10", "port": 22}})
+
+        verify.assert_called_once()
+        self.assertFalse(result["snapshotReused"])
+
     @patch.object(ccrelay_cli, "validate_identity_credentials", return_value=None)
     @patch.object(ccrelay_cli.ccrelay_ssh, "save_config")
     @patch.object(ccrelay_cli.ccrelay_ssh, "load_config")
@@ -1720,6 +2133,7 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertEqual("NEED_USER_INPUT", result["status"])
         self.assertEqual("DEDICATED_PENDING", config["clusterIdentity"]["accountMode"])
         self.assertTrue(config["clusterIdentity"]["dedicatedAccountCreationAllowed"])
+        self.assertEqual("AUTO", config["clusterIdentity"]["trustTopology"])
         self.assertEqual("ccrelay", config["clusterIdentity"]["dedicatedAccount"]["username"])
         self.assertEqual(2, save_config.call_count)
         save_config.assert_called_with(config)
@@ -2327,10 +2741,10 @@ class CcRelayCliTest(unittest.TestCase):
 
     def test_center_start_scripts_reclaim_only_current_bundle_processes_before_port_check(self):
         linux = ccrelay_center.linux_start_script(
-            "/home/ccrelay/ccrelay/node-18192", 18192, "secret",
+            "/home/ccrelay/ccrelay/node-18192", 18192, "secret", "RSA",
         )
         windows = ccrelay_center.windows_start_script(
-            "C:/Users/ccrelay/ccrelay/node-18192", 18192, "secret",
+            "C:/Users/ccrelay/ccrelay/node-18192", 18192, "secret", "RSA",
         )
 
         self.assertIn('index($0, " -jar " app)', linux)
@@ -2343,6 +2757,9 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertIn("CommandLine.IndexOf($app", windows)
         self.assertIn("TcpListener", windows)
         self.assertIn("CCRELAY_CENTER_PORT_IN_USE|port=18192", windows)
+        for script in (linux, windows):
+            self.assertIn("CCRELAY_SSH_KEY_ALGORITHM", script)
+            self.assertIn("RSA", script)
         self.assertNotIn("Get-Content $pidFile", windows)
 
     @patch.object(ccrelay_center, "run_command", return_value={"success": False, "summary": "relay exited"})
@@ -2833,6 +3250,12 @@ class CcRelayCliTest(unittest.TestCase):
                          [item["targetNodeId"] for item in result["results"]])
         self.assertEqual(1, len(opened_sessions))
         self.assertEqual(3, len({item["taskId"] for item in submitted}))
+        self.assertEqual({result["batchId"]}, {
+            item["payload"]["deploymentBatchId"] for item in submitted
+        })
+        self.assertEqual({2}, {
+            item["payload"]["deploymentBatchConcurrency"] for item in submitted
+        })
 
     def test_deploy_batch_isolates_child_submission_failure(self):
         submitted = []

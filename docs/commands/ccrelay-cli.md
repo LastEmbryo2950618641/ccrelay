@@ -60,6 +60,10 @@ $env:CCRELAY_CENTER_URL = "<center-url>"
 
 SSH 集群命令 `bootstrap next`、`ssh identity plan|select|apply|verify|rotate-key` 和 `center plan|bootstrap` 还支持 `--concurrency <n>`。默认 `4`，范围 `1-32`，表示本次 SSH 多节点操作允许同时执行的最大任务数；实际并发不会超过任务数。
 
+身份命令支持 `--trust-topology AUTO|CENTER_ONLY|FULL_MESH`。账号模式与信任拓扑独立：专用账号不再自动等价于 FULL_MESH。`AUTO` 根据完整 active 目标节点数与 `fullMeshThreshold` 动态解析，超过阈值使用 CENTER_ONLY，否则使用 FULL_MESH。CENTER_ONLY 只在 Center 安装集群私钥，普通节点只安装公钥；验证时控制端只建立一次外层 Center SSH，由 Center 按 `--concurrency` 验证各目标，不创建 `N * (N - 1)` 条节点间验证任务。
+
+`identity apply` 的验证结果会以不含密码和私钥的快照保存在 Skill `.local`。Center 启动后，如果 Center 节点、active 节点集合、账号模式和有效拓扑均未变化，CLI 只将快照写入 Center SQLite，不再重复执行完整 SSH 验证；任一条件变化则重新验证。
+
 节点连接与环境探测、账号或公钥安装、Center 到节点验证按节点并发；专用账号 FULL_MESH 验证按 `(source,target)` 信任边并发。单个节点内部步骤仍保持顺序，输出始终按输入节点或信任边顺序排列；单节点失败会记录为该节点失败，不会取消其他节点。
 
 ## 命令清单
@@ -185,7 +189,7 @@ HMAC secret 属于跨进程配置。`config secret set wdsavs.ai.relay.hmac-secr
 - 顶层 `observe` 与 `task observe` 同义，适合先看窗口再决定是否深入。
 - `task create`：创建本地异步任务。
 - `task create` 必须提供 `--session-id`，或通过 `--json/--json-file` 提供 `sessionId`；CLI 会在发起 HTTP 请求前拒绝缺失会话的请求。
-- `task create-batch`：面向中小集群批量创建 `DEPLOY_RELAY` 子任务。它只打开一次部署会话，按 `--concurrency` 有界并发提交每个目标，单个目标失败不取消其他目标，返回结果按输入目标顺序排列；命令只提交任务，不等待部署终态。
+- `task create-batch`：面向中小集群批量创建 `DEPLOY_RELAY` 子任务。它只打开一次部署会话，为每个子任务写入相同批次 ID 和并发上限；服务端按该上限约束真实部署执行，单个目标失败不取消其他目标，结果按输入目标顺序排列。命令只提交任务，不等待部署终态。
 - `task get <taskId>`：查询本地异步任务。
 - `task status <taskId>`：查询任务状态。
 - `task cancel <taskId>`：取消任务。
@@ -214,7 +218,7 @@ HMAC secret 属于跨进程配置。`config secret set wdsavs.ai.relay.hmac-secr
   --timeout-ms 600000
 ```
 
-`--target-node-ids` 支持逗号分隔，也可以重复传入；重复目标会去重。`--concurrency` 范围为 `1-32`，默认 `4`，只限制本次批量提交和中心 SSH 预检的并发数。每个目标仍由现有单目标部署执行器独立处理，任务 ID 可使用 `task get <taskId>`、`task events <taskId>` 或 `task observe --task-ids <taskId,...>` 继续查看。当前未实现动态源池、滚动波次、自动换源、取消聚合和重启恢复。
+`--target-node-ids` 支持逗号分隔，也可以重复传入；重复目标会去重。`--concurrency` 范围为 `1-32`，默认 `4`，同时限制 SSH 预检、任务提交和服务端实际制品传输/安装数。等待执行许可的任务显示为 `WAITING_BATCH_SLOT`。每个目标仍由现有单目标部署执行器独立处理，任务 ID 可使用 `task get <taskId>`、`task events <taskId>` 或 `task observe --task-ids <taskId,...>` 继续查看。当前未实现动态源池、滚动波次、自动换源和取消聚合。
 
 ### A2A
 
@@ -324,6 +328,7 @@ scripts\prepare-cc-config.ps1 --prompt-api-key --test --write <skill>\.local\cc-
 - `ssh config set-node --host <ip> --port <port>`：配置 `ip:port` 节点级覆盖。
 - `ssh tools`：检查本机 `ssh`、`scp`、`ssh-keygen`。
 - `ssh identity plan`：只读探测引导账号、远端系统和账号创建权限。
+- `ssh identity plan|select|apply|verify|rotate-key --key-algorithm AUTO|ED25519|RSA`：配置集群 SSH 密钥算法。`AUTO` 汇总全部目标节点的有效 `PubkeyAcceptedAlgorithms`，全部支持 ED25519 才优先使用 ED25519，否则选择 RSA 3072；检测结果与已有密钥算法不一致时创建新算法密钥，旧密钥不覆盖，成功验证后才更新当前配置。显式选择与节点能力冲突时在 plan 阶段返回不兼容节点。
 - `ssh identity select --allow-create <true|false>`：用户选择后立即保存本地账号模式、专用账号名和目录模板，不修改远端。
 - `ssh identity apply --execution-mode <AUTO_EXECUTE_REMAINING|INSPECT_STEP_BY_STEP>`：在用户确认执行模式、资源探测和中心选择完成后，从本地配置读取账号模式并初始化身份。中心尚未启动时先保存在 Skill 本地，中心启动后由 `ssh identity verify` 同步到 SQLite。
 - `ssh identity status`：查看本地和中心保存的账号策略与脱敏能力摘要。
@@ -336,6 +341,8 @@ scripts\prepare-cc-config.ps1 --prompt-api-key --test --write <skill>\.local\cc-
 首次 `bootstrap next --node ...` 会在任何 SSH 远端操作前持久化完整目标集合。后续身份命令即使省略 `--node`，或者只重复传入其中一部分，也会使用完整 active 目标集合，不会静默缩小部署范围。认证失败和网络不可达只更新 `failedNodes`，不会自动删除目标节点。
 
 `FULL_MESH` 按完整 active 目标集合计算。N 个专用账号节点必须全部成功，并具备 `N * (N - 1)` 条已验证有向互信边；因此两节点需要 2 条、三节点需要 6 条，只有真实单节点允许空互信边集合。
+
+`CENTER_ONLY` 的普通节点不得持有集群私钥。`identity apply` 会保留普通节点 `authorized_keys` 中的 Center 公钥，并删除该 Skill 专用账号目录内由 `.ccrelay-managed` 管理的历史集群私钥；用户自有账号和非受管目录不在清理范围内。
 
 专用账号探测结果中的 `dedicatedInspection=INACCESSIBLE` 表示引导账号无法读取该账号目录，不等于账号冲突或创建失败。只有 `dedicatedInspection=UNMANAGED` 且检查权限明确可用时才报告同名账号冲突；如果集群私钥可以直接登录专用账号，`identity apply|verify` 会直接以专用账号完成验收，避免依赖引导账号的 `sudo -u` 权限。
 
@@ -403,7 +410,7 @@ GUI 只负责拉起终端，不负责接收或回显密码；Windows 使用 `ccr
 ```powershell
 <CLI> ssh config set-default --username liuqi --port 22
 <CLI> ssh config set-passwordless-default --username ops --port 22 --private-key-file ~/.ssh/id_ed25519
-<CLI> ssh identity plan --nodes 47.93.195.246:22,111.229.32.85:22 --concurrency 4
+<CLI> ssh identity plan --nodes 47.93.195.246:22,111.229.32.85:22 --concurrency 4 --key-algorithm AUTO
 <CLI> ssh identity select --allow-create false --node <node-a>:22 --node <node-b>:22
 <CLI> ssh identity apply --execution-mode AUTO_EXECUTE_REMAINING --center-node <selected-center>:22 --nodes <node-a>:22,<node-b>:22 --concurrency 4
 # 专用模式还必须在用户看到目录预览后确认：

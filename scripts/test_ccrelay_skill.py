@@ -42,6 +42,37 @@ class SkillInstallHandler(BaseHTTPRequestHandler):
 
 class CcRelaySkillTest(unittest.TestCase):
 
+    def test_skill_requires_architecture_contract_before_deployment(self):
+        skill_root = REPO_ROOT / "codex-skill" / "ccrelay"
+        skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        runbook_text = (skill_root / "references" / "remote-first-runbook.md").read_text(encoding="utf-8")
+
+        self.assertIn("部署架构契约", skill_text)
+        self.assertIn("部署前必须先读取", skill_text)
+        self.assertIn("调用端 AI", runbook_text)
+        self.assertIn("CC center 控制面", runbook_text)
+        self.assertIn("Center Relay sidecar", runbook_text)
+        self.assertIn("远端 Relay 与 Agent", runbook_text)
+        self.assertIn("SSH 只负责引导和部署恢复", runbook_text)
+        self.assertIn("SQLite", runbook_text)
+
+    def test_skill_defines_goal_oriented_script_failure_fallback(self):
+        skill_root = REPO_ROOT / "codex-skill" / "ccrelay"
+        skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        runbook_text = (skill_root / "references" / "remote-first-runbook.md").read_text(encoding="utf-8")
+
+        self.assertIn("自然语言运维兜底", skill_text)
+        self.assertIn("不得无限重试同一脚本", skill_text)
+        self.assertIn("先声明本步骤的目标", skill_text)
+        self.assertIn("脚本失败的自然语言兜底", runbook_text)
+        self.assertIn("SSH 连通性探测", runbook_text)
+        self.assertIn("专用账号创建", runbook_text)
+        self.assertIn("公钥安装", runbook_text)
+        self.assertIn("制品传输", runbook_text)
+        self.assertIn("进程启动", runbook_text)
+        self.assertIn("状态回写与标准验收", runbook_text)
+        self.assertIn("不得把手工命令成功等同于部署完成", runbook_text)
+
     def test_repository_role_skill_uploads_through_cli_install_flow(self):
         skill = REPO_ROOT / "example-skills" / "gugugaga-roleplay"
         SkillInstallHandler.uploaded_artifact = b""

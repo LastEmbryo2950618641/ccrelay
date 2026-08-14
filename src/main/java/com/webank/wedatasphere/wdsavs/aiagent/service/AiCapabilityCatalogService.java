@@ -76,7 +76,7 @@ public class AiCapabilityCatalogService {
         card.setDescription("CC Relay core relay and A2A bridge");
         card.setUrl("/api/ai/a2a/message/send");
         card.setProtocolVersion("0.3.0");
-        card.setVersion("0.1.1");
+        card.setVersion("0.1.2");
         card.setPreferredTransport("JSONRPC");
         A2aAgentCapabilities capabilities = new A2aAgentCapabilities();
         capabilities.setStreaming(true);

@@ -135,6 +135,94 @@ class SshIdentityServiceImplTest {
     }
 
     @Test
+    void dedicatedCenterOnlyTopologyDoesNotRequireTrustEdges() {
+        SshClusterIdentityPolicyRepository policyRepository = mock(SshClusterIdentityPolicyRepository.class);
+        SshNodeAccessStateRepository nodeRepository = mock(SshNodeAccessStateRepository.class);
+        SshNodeTrustEdgeRepository edgeRepository = mock(SshNodeTrustEdgeRepository.class);
+        SshIdentityAuditEventRepository auditEventRepository = mock(SshIdentityAuditEventRepository.class);
+        when(policyRepository.findById("default")).thenReturn(Optional.empty());
+        when(policyRepository.save(any(SshClusterIdentityPolicyEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(nodeRepository.findByClusterIdAndNodeKey(any(), any())).thenReturn(Optional.empty());
+        when(nodeRepository.save(any(SshNodeAccessStateEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        SshNodeAccessStateEntity firstNode = readyNode("node-a:22");
+        firstNode.setAccountStatus("ACTIVE");
+        SshNodeAccessStateEntity secondNode = readyNode("node-b:22");
+        secondNode.setAccountStatus("ACTIVE");
+        when(nodeRepository.findByClusterIdOrderByNodeKeyAsc("default"))
+                .thenReturn(List.of(firstNode, secondNode));
+        when(edgeRepository.findByClusterIdOrderBySourceNodeKeyAscTargetNodeKeyAsc("default"))
+                .thenReturn(List.of());
+
+        SshIdentityStateRequest request = new SshIdentityStateRequest();
+        request.setAccountMode("DEDICATED_MANAGED");
+        request.setDedicatedAccountCreationAllowed(true);
+        request.setDedicatedUsername("ccrelay");
+        request.setClusterKeyMode("CENTER_ONLY_SHARED_KEYPAIR");
+        request.setCenterNodeId("node-a:22");
+        SshIdentityNodeStateRequest firstRequest = new SshIdentityNodeStateRequest();
+        firstRequest.setNodeKey("node-a:22");
+        firstRequest.setAccountStatus("ACTIVE");
+        firstRequest.setCenterAccessStatus("READY");
+        SshIdentityNodeStateRequest secondRequest = new SshIdentityNodeStateRequest();
+        secondRequest.setNodeKey("node-b:22");
+        secondRequest.setAccountStatus("ACTIVE");
+        secondRequest.setCenterAccessStatus("READY");
+        request.setNodes(List.of(firstRequest, secondRequest));
+
+        Map<String, Object> result = new SshIdentityServiceImpl(
+                policyRepository, nodeRepository, edgeRepository, auditEventRepository)
+                .saveState(request);
+
+        assertEquals("DEDICATED_MANAGED", result.get("accountMode"));
+        assertEquals("CENTER_ONLY", result.get("effectiveCapability"));
+        assertEquals("NOT_REQUIRED", result.get("nodeToNodeStatus"));
+        assertEquals("ACTIVE", result.get("dedicatedAccountStatus"));
+        assertTrue((Boolean) result.get("canCreateAccounts"));
+        assertTrue(!(Boolean) result.get("canDirectSelfReplicate"));
+    }
+
+    @Test
+    void singleNodeExplicitCenterOnlyRemainsCenterOnly() {
+        SshClusterIdentityPolicyRepository policyRepository = mock(SshClusterIdentityPolicyRepository.class);
+        SshNodeAccessStateRepository nodeRepository = mock(SshNodeAccessStateRepository.class);
+        SshNodeTrustEdgeRepository edgeRepository = mock(SshNodeTrustEdgeRepository.class);
+        SshIdentityAuditEventRepository auditEventRepository = mock(SshIdentityAuditEventRepository.class);
+        when(policyRepository.findById("default")).thenReturn(Optional.empty());
+        when(policyRepository.save(any(SshClusterIdentityPolicyEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(nodeRepository.findByClusterIdAndNodeKey(any(), any())).thenReturn(Optional.empty());
+        when(nodeRepository.save(any(SshNodeAccessStateEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        SshNodeAccessStateEntity node = readyNode("node-a:22");
+        node.setAccountStatus("ACTIVE");
+        when(nodeRepository.findByClusterIdOrderByNodeKeyAsc("default")).thenReturn(List.of(node));
+        when(edgeRepository.findByClusterIdOrderBySourceNodeKeyAscTargetNodeKeyAsc("default"))
+                .thenReturn(List.of());
+
+        SshIdentityStateRequest request = new SshIdentityStateRequest();
+        request.setAccountMode("DEDICATED_MANAGED");
+        request.setDedicatedAccountCreationAllowed(true);
+        request.setDedicatedUsername("ccrelay");
+        request.setClusterKeyMode("CENTER_ONLY_SHARED_KEYPAIR");
+        request.setCenterNodeId("node-a:22");
+        SshIdentityNodeStateRequest nodeRequest = new SshIdentityNodeStateRequest();
+        nodeRequest.setNodeKey("node-a:22");
+        nodeRequest.setAccountStatus("ACTIVE");
+        nodeRequest.setCenterAccessStatus("READY");
+        request.setNodes(List.of(nodeRequest));
+
+        Map<String, Object> result = new SshIdentityServiceImpl(
+                policyRepository, nodeRepository, edgeRepository, auditEventRepository)
+                .saveState(request);
+
+        assertEquals("CENTER_ONLY", result.get("effectiveCapability"));
+        assertEquals("NOT_REQUIRED", result.get("nodeToNodeStatus"));
+    }
+
+    @Test
     void incompleteTrustGraphCannotBecomeFullMesh() {
         SshClusterIdentityPolicyRepository policyRepository = mock(SshClusterIdentityPolicyRepository.class);
         SshNodeAccessStateRepository nodeRepository = mock(SshNodeAccessStateRepository.class);
