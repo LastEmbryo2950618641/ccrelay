@@ -26,6 +26,8 @@ public class RemoteCcRelayProperties {
     private long heartbeatIntervalMs = 30000L;
     private String skillDirectory = "./skills";
     private String skillMetadataDbPath;
+    private String promptDirectory = "./prompts";
+    private String promptMetadataPath;
     private String nodeIdFilePath;
     private String contextStateFilePath;
     private String nodeId;

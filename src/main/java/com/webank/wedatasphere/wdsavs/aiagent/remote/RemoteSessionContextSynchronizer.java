@@ -22,6 +22,7 @@ final class RemoteSessionContextSynchronizer {
     private final RestTemplate restTemplate;
     private final RelayRequestSecurityService requestSecurityService;
     private final RemoteSessionContextStateStore stateStore;
+    private final PromptSnapshotProvider promptSnapshotProvider;
 
     RemoteSessionContextSynchronizer(RestTemplate restTemplate,
                                      RelayRequestSecurityService requestSecurityService,
@@ -29,6 +30,17 @@ final class RemoteSessionContextSynchronizer {
         this.restTemplate = restTemplate;
         this.requestSecurityService = requestSecurityService;
         this.stateStore = stateStore;
+        this.promptSnapshotProvider = null;
+    }
+
+    RemoteSessionContextSynchronizer(RestTemplate restTemplate,
+                                     RelayRequestSecurityService requestSecurityService,
+                                     RemoteSessionContextStateStore stateStore,
+                                     PromptSnapshotProvider promptSnapshotProvider) {
+        this.restTemplate = restTemplate;
+        this.requestSecurityService = requestSecurityService;
+        this.stateStore = stateStore;
+        this.promptSnapshotProvider = promptSnapshotProvider;
     }
 
     SyncState synchronize(AiChatRequest request, String localNodeId) {
@@ -43,7 +55,13 @@ final class RemoteSessionContextSynchronizer {
             return null;
         }
 
-        long appliedCursor = stateStore.cursor(sessionId);
+        PromptSnapshot promptSnapshot = promptSnapshotProvider == null
+                ? PromptSnapshot.empty() : promptSnapshotProvider.snapshot();
+        boolean rotateModelSession = requiresRotation(sessionId, promptSnapshot);
+        String modelSessionId = rotateModelSession
+                ? stateStore.rotatedModelSessionId(sessionId, localNodeId, promptSnapshot.getUnifiedDigest())
+                : stateStore.modelSessionId(sessionId, localNodeId);
+        long appliedCursor = rotateModelSession ? 0L : stateStore.cursor(sessionId);
         long expectedHead = longValue(metadata.get("contextHeadCursor"));
         List<AiChatMessage> contextMessages = new ArrayList<>();
         for (int page = 0; page < MAX_PAGES; page++) {
@@ -66,13 +84,15 @@ final class RemoteSessionContextSynchronizer {
             }
         }
 
-        metadata.put("modelSessionId", stateStore.modelSessionId(sessionId, localNodeId));
-        metadata.put("resumeModelSession", stateStore.modelSessionStarted(sessionId));
+        metadata.put("modelSessionId", modelSessionId);
+        metadata.put("resumeModelSession", stateStore.modelSessionStarted(sessionId, modelSessionId));
+        metadata.put("ccrelayPromptSnapshot", promptSnapshot);
         if (!contextMessages.isEmpty()) {
             request.setMessages(contextMessages);
         }
         request.setMetadata(metadata);
-        return new SyncState(sessionId, appliedCursor);
+        return new SyncState(sessionId, appliedCursor, modelSessionId,
+                promptSnapshot.getRevision(), promptSnapshot.getUnifiedDigest());
     }
 
     void recordExecution(SyncState syncState, AiChatResponse response) {
@@ -82,12 +102,24 @@ final class RemoteSessionContextSynchronizer {
         Map<String, Object> responseMetadata = response.getMetadata() == null
                 ? new LinkedHashMap<>() : new LinkedHashMap<>(response.getMetadata());
         if (Boolean.parseBoolean(String.valueOf(responseMetadata.remove(MODEL_SESSION_STARTED_METADATA)))) {
-            stateStore.markModelSessionStarted(syncState.sessionId());
+            stateStore.markModelSessionStarted(syncState.sessionId(), syncState.modelSessionId());
         }
         response.setMetadata(responseMetadata);
         if ("SUCCESS".equalsIgnoreCase(response.getStatus())) {
-            stateStore.markApplied(syncState.sessionId(), syncState.cursor());
+            stateStore.markApplied(syncState.sessionId(), syncState.cursor(), syncState.modelSessionId(),
+                    syncState.promptRevision(), syncState.unifiedDigest());
         }
+    }
+
+    private boolean requiresRotation(String sessionId, PromptSnapshot snapshot) {
+        if (!stateStore.modelSessionStarted(sessionId)) {
+            return false;
+        }
+        String appliedDigest = stateStore.appliedUnifiedDigest(sessionId);
+        if (isBlank(appliedDigest)) {
+            return !snapshot.getUnified().isEmpty();
+        }
+        return !appliedDigest.equals(snapshot.getUnifiedDigest());
     }
 
     private Map<?, ?> fetchDelta(String endpoint, String sessionId, long afterCursor,
@@ -233,6 +265,10 @@ final class RemoteSessionContextSynchronizer {
         return value == null || value.trim().isEmpty();
     }
 
-    record SyncState(String sessionId, long cursor) {
+    record SyncState(String sessionId,
+                     long cursor,
+                     String modelSessionId,
+                     String promptRevision,
+                     String unifiedDigest) {
     }
 }

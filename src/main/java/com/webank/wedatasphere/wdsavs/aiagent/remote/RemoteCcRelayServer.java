@@ -81,6 +81,7 @@ public class RemoteCcRelayServer {
     private final RemoteSessionContextSynchronizer sessionContextSynchronizer;
     private final ConcurrentMap<String, SelfReplicateOperation> selfReplicateStore = new ConcurrentHashMap<>();
     private final RemoteSkillSyncCoordinator skillSyncCoordinator;
+    private final RemotePromptSyncCoordinator promptSyncCoordinator;
     private HttpServer server;
     private String localNodeId;
 
@@ -108,8 +109,10 @@ public class RemoteCcRelayServer {
         this.sessionContextSynchronizer = new RemoteSessionContextSynchronizer(
                 restTemplate,
                 requestSecurityService,
-                new RemoteSessionContextStateStore(properties, objectMapper));
+                new RemoteSessionContextStateStore(properties, objectMapper),
+                new PromptSnapshotProvider(properties));
         this.skillSyncCoordinator = new RemoteSkillSyncCoordinator(properties, restTemplate);
+        this.promptSyncCoordinator = new RemotePromptSyncCoordinator(properties, restTemplate);
     }
 
     private static RestTemplate createRestTemplate(RemoteCcRelayProperties properties) {
@@ -174,6 +177,7 @@ public class RemoteCcRelayServer {
         taskExecutor.shutdownNow();
         sessionExecutionGate.shutdownNow();
         skillSyncCoordinator.close();
+        promptSyncCoordinator.close();
     }
 
     public String getLocalNodeId() {
@@ -273,6 +277,7 @@ public class RemoteCcRelayServer {
         }
         postCenterRequest(endpoint, buildHeartbeatRequest(), Object.class, true);
         skillSyncCoordinator.trigger();
+        promptSyncCoordinator.trigger();
     }
 
     private <T> T postCenterRequest(String endpoint, Object request, Class<T> responseType, boolean retryOnce) {
@@ -324,6 +329,7 @@ public class RemoteCcRelayServer {
         request.getDetail().put("nodeRole", properties == null ? "RELAY" : firstNonBlank(properties.getNodeRole(), "RELAY"));
         request.getDetail().put("aiReadiness", aiReadinessStatus());
         request.getDetail().put("skills", skillSyncCoordinator.summary());
+        request.getDetail().put("prompts", promptSyncCoordinator.summary());
         return request;
     }
 
@@ -597,6 +603,7 @@ public class RemoteCcRelayServer {
             record.executionMode = policy.getExecutionMode();
             record.react = policy.toSummaryMap();
             AiChatRequest taskRequest = toTaskChatRequest(params);
+            promptSyncCoordinator.requireCurrent();
             RemoteSessionContextSynchronizer.SyncState contextSync =
                     sessionContextSynchronizer.synchronize(taskRequest, localNodeId);
             AiChatResponse response = payloadPolicyService.normalizeChatResponse(
@@ -652,6 +659,11 @@ public class RemoteCcRelayServer {
     }
 
     private AiChatResponse executeChat(AiChatRequest request) {
+        try {
+            promptSyncCoordinator.requireCurrent();
+        } catch (Exception e) {
+            return new AiChatResponse(e.getMessage(), "PROMPT_SYNC_FAILED", UUID.randomUUID().toString());
+        }
         RemoteSessionContextSynchronizer.SyncState contextSync =
                 sessionContextSynchronizer.synchronize(request, localNodeId);
         AiChatResponse response = payloadPolicyService.normalizeChatResponse(relayService.relay(request));
@@ -1535,6 +1547,10 @@ public class RemoteCcRelayServer {
                 value("wdsavs.ai.skill.directory", null),
                 value("CCRELAY_SKILL_DIR", properties.getSkillDirectory())));
         properties.setSkillMetadataDbPath(value("CCRELAY_SKILL_DB", properties.getSkillMetadataDbPath()));
+        properties.setPromptDirectory(firstNonBlankValue(
+                value("wdsavs.ai.prompt.directory", null),
+                value("CCRELAY_PROMPT_DIR", properties.getPromptDirectory())));
+        properties.setPromptMetadataPath(value("CCRELAY_PROMPT_METADATA", properties.getPromptMetadataPath()));
         properties.setNodeIdFilePath(value("WDSAVS_AI_RELAY_NODE_ID_FILE", properties.getNodeIdFilePath()));
         properties.setNodeHost(value("WDSAVS_AI_RELAY_NODE_HOST", properties.getNodeHost()));
         properties.setNodeId(value("WDSAVS_AI_RELAY_NODE_ID", properties.getNodeId()));

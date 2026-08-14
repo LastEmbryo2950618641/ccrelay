@@ -103,6 +103,23 @@ CC Relay 是面向所有支持标准 Skill 的 AI 产品的远端多 Agent 协�
 - 全局 `ccrelay-cli` 仅是可选快捷别名，不作为标准 Skill 依赖。
 - CLI 中文手册：`docs/commands/ccrelay-cli.md`
 
+## 集群 Prompt 管理
+
+固定 Prompt 由 CC Center 统一管理，Relay 随心跳同步并在任务开始前校验完整 revision：
+
+```bash
+<CLI> prompt install ./shared-rules.md --id shared-rules --type UNIFIED --order 10
+<CLI> prompt install ./evidence-check.md --id evidence-check --type PRE --order 20
+<CLI> prompt install ./final-review.md --id final-review --type POST --order 10
+<CLI> prompt list
+<CLI> prompt remove final-review
+```
+
+- `UNIFIED` 位于 Relay 固定安全职责之后、共享最终回复上下文之前；内容或顺序变化时 Relay 旋转私有模型 Session 并重放 Center 共享上下文。
+- `PRE` 在每个 Agent 正式 ReAct 前按 `order` 注入，同一任务 attempt 的模型重试不会重复注入。
+- `POST` 在正常 ReAct 产生私有候选后触发第二次模型定稿；定稿阶段禁用工具与节点协作，只有成功的第二阶段答案进入共享上下文。
+- 三种类型都按 `order ASC, promptId ASC` 排序。同一任务固定使用一个 Prompt revision，执行期间的目录更新只影响后续任务。
+
 ## GitHub Actions 构建
 
 仓库内置 `.github/workflows/build-skill-zip.yml`：

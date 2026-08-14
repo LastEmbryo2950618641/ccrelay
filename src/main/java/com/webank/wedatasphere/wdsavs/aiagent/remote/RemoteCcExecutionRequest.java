@@ -17,6 +17,7 @@ public class RemoteCcExecutionRequest {
     private String workingDirectory;
     private String model;
     private String prompt;
+    private String retryPrompt;
     private String modelSessionId;
     private boolean resumeModelSession;
     private String claudeSettingsFile;
@@ -25,4 +26,7 @@ public class RemoteCcExecutionRequest {
     private ClaudeCodeConvergencePolicy convergencePolicy;
     private long timeoutMs;
     private ReactEventWriter eventWriter;
+    private PromptSnapshot promptSnapshot;
+    private boolean privateDraft;
+    private String executionPhase;
 }

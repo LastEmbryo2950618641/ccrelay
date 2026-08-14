@@ -383,6 +383,64 @@ class CcRelayCliTest(unittest.TestCase):
         self.assertIn("保存为通用配置: 是", skill)
         self.assertNotIn("保存为通用配置（是/否）", skill)
 
+    def test_prompt_install_sends_metadata(self):
+        prompt_path = Path(self.temporary_directory.name) / "quality-check.md"
+        prompt_path.write_text("先核对事实，再给出结论。", encoding="utf-8")
+        args = ccrelay_cli.build_parser().parse_args([
+            "prompt", "install", str(prompt_path),
+            "--id", "quality-check", "--type", "PRE", "--order", "10",
+        ])
+        args.center = self.center
+        args.timeout = 5.0
+
+        with patch.object(ccrelay_cli.ccrelay_skill, "request", return_value={"status": "ACTIVE"}) as request:
+            result = args.func(args)
+
+        self.assertEqual("ACTIVE", result["status"])
+        request.assert_called_once_with(
+            args,
+            "POST",
+            "/api/prompt/catalog/install",
+            data="先核对事实，再给出结论。".encode("utf-8"),
+            content_type="text/plain; charset=utf-8",
+            headers={
+                "X-CCRelay-Prompt-Id": "quality-check",
+                "X-CCRelay-Prompt-Type": "PRE",
+                "X-CCRelay-Prompt-Order": "10",
+            },
+        )
+
+    def test_prompt_list_and_remove_use_prompt_catalog(self):
+        list_args = ccrelay_cli.build_parser().parse_args(["prompt", "list"])
+        remove_args = ccrelay_cli.build_parser().parse_args(["prompt", "remove", "quality-check"])
+        list_args.center = remove_args.center = self.center
+        list_args.timeout = remove_args.timeout = 5.0
+
+        with patch.object(ccrelay_cli.ccrelay_skill, "request", return_value={}) as request:
+            list_args.func(list_args)
+            remove_args.func(remove_args)
+
+        self.assertEqual(
+            [
+                call(list_args, "GET", "/api/prompt/catalog"),
+                call(remove_args, "DELETE", "/api/prompt/catalog/quality-check"),
+            ],
+            request.call_args_list,
+        )
+
+    def test_prompt_install_rejects_invalid_input_before_http(self):
+        prompt_path = Path(self.temporary_directory.name) / "invalid.md"
+        prompt_path.write_bytes(b"\xff")
+        args = argparse.Namespace(
+            path=str(prompt_path), prompt_id="Invalid Id", prompt_type="PRE", order=0,
+            center=self.center, timeout=5.0,
+        )
+
+        with patch.object(ccrelay_cli.ccrelay_skill, "request") as request:
+            with self.assertRaises(ccrelay_cli.ccrelay_skill.SkillError):
+                ccrelay_cli.ccrelay_skill.install_prompt(args)
+        request.assert_not_called()
+
     @patch.object(ccrelay_cli.subprocess, "Popen")
     @patch.object(ccrelay_cli, "_discover_local_center_pids", return_value=[])
     @patch.object(ccrelay_cli, "_local_center_health", return_value={"status": "UP", "component": "center"})

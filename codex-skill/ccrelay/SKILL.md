@@ -435,4 +435,13 @@ SSH 免密: 已验证
 - CC Center 是 Skill 目录和制品的唯一权威来源。CLI 只上传 Center；Center Relay 与普通 Relay 在成功心跳后异步按 SHA-256 收敛，不要求用户确认远端 Skill 目录。
 - 删除是逻辑失效。Center 保留 `INVALID` 元数据，Relay 收到完整目录后将对应本地 Skill 置为 `INVALID` 并移出 Claude 可见目录。
 - Relay 返回 `INSTALLING` 且带 `lastError` 时表示本轮传输或校验失败、后续心跳会重试，不得解释为用户已删除或 Skill 已失效。只有 `INSTALLED` 的 Skill 才能用于后续 Agent 调用。
+
+## 集群 Prompt 管理
+
+- 用户要求安装固定 Prompt 时，执行 `<CLI> prompt install <prompt-file> --id <promptId> --type UNIFIED|PRE|POST --order <n>`；Prompt 文件必须是非空 UTF-8 文本，类型和顺序必须由用户需求明确给出，不得由 AI 猜测。
+- 用户要求查看或删除时，分别执行 `<CLI> prompt list` 与 `<CLI> prompt remove <promptId>`。删除是 Center `INVALID` 逻辑失效，不能逐节点手工删除文件。
+- `UNIFIED` 固定在 Relay 内置安全职责之后，并位于共享最终回复上下文前；`PRE` 在每个 Agent 正式 ReAct 前注入；`POST` 在候选回复完成后执行禁用工具和协作的私有二次定稿。
+- Center 共享上下文只能写入成功定稿后的最终回复和共享事实。UNIFIED/PRE/POST 内容、私有 ReAct/tool 过程和 POST 候选回复都不得写入共享上下文。
+- Relay 必须在任务开始前同步并校验完整 Prompt revision。返回 Prompt 同步或摘要错误时必须暂停新任务并报告错误，不得静默忽略 Prompt 或继续使用已知过期版本。
+- 同一任务固定使用一个 revision，三种类型内部均按 `order ASC, promptId ASC` 排序；执行中的目录更新只影响后续任务。
 - 关闭会话使用 `session close <sessionId>`；关闭后该会话下仍可用的授权会失效。

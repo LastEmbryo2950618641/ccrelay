@@ -37,6 +37,7 @@ public class RemoteCcRelayService {
     private final RemoteCcRelayProperties properties;
     private final RemoteCcCommandRunner runner;
     private final RelaySystemPromptProvider systemPromptProvider;
+    private final PromptSnapshotProvider promptSnapshotProvider;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public RemoteCcRelayService(RemoteCcRelayProperties properties, RemoteCcCommandRunner runner) {
@@ -50,6 +51,7 @@ public class RemoteCcRelayService {
         this.runner = runner;
         this.systemPromptProvider = systemPromptProvider == null
                 ? new RelaySystemPromptProvider(this.properties) : systemPromptProvider;
+        this.promptSnapshotProvider = new PromptSnapshotProvider(this.properties);
     }
 
     public AiChatResponse relay(AiChatRequest request) {
@@ -66,11 +68,118 @@ public class RemoteCcRelayService {
         if (request == null) {
             throw new IllegalArgumentException("AiChatRequest is required");
         }
-        AiChatResponse response = runner.execute(toExecutionRequest(request, eventWriter, maxDurationMs));
+        RemoteCcExecutionRequest executionRequest = toExecutionRequest(request, eventWriter, maxDurationMs);
+        PromptSnapshot snapshot = executionRequest.getPromptSnapshot();
+        if (isSessionTitleRequest(request) || snapshot == null || snapshot.getPost().isEmpty()) {
+            return ensureTraceId(runner.execute(executionRequest));
+        }
+        executionRequest.setPrivateDraft(true);
+        executionRequest.setExecutionPhase("REACT_CANDIDATE");
+        AiChatResponse candidate = ensureTraceId(runner.execute(executionRequest));
+        if (!"SUCCESS".equalsIgnoreCase(candidate.getStatus())) {
+            return candidate;
+        }
+        RemoteCcExecutionRequest finalizationRequest = finalizationRequest(executionRequest, candidate, snapshot);
+        AiChatResponse finalization = ensureTraceId(runner.execute(finalizationRequest));
+        if (!"SUCCESS".equalsIgnoreCase(finalization.getStatus())) {
+            AiChatResponse failed = new AiChatResponse(
+                    "POST finalization failed: " + firstNonBlank(finalization.getAnswer(), "unknown error"),
+                    "POST_FINALIZATION_FAILED", finalization.getTraceId());
+            copySessionStartedMetadata(candidate, finalization, failed);
+            return failed;
+        }
+        copySessionStartedMetadata(candidate, finalization, finalization);
+        return finalization;
+    }
+
+    private AiChatResponse ensureTraceId(AiChatResponse response) {
+        if (response == null) {
+            response = new AiChatResponse("Remote CC command returned no response", "FAILED", null);
+        }
         if (response.getTraceId() == null || response.getTraceId().trim().isEmpty()) {
             response.setTraceId(UUID.randomUUID().toString());
         }
         return response;
+    }
+
+    private RemoteCcExecutionRequest finalizationRequest(RemoteCcExecutionRequest candidateRequest,
+                                                         AiChatResponse candidate,
+                                                         PromptSnapshot snapshot) {
+        RemoteCcExecutionRequest request = new RemoteCcExecutionRequest();
+        request.setCommand(candidateRequest.getCommand());
+        request.setArguments(withToolsDisabled(candidateRequest.getArguments()));
+        request.setWorkingDirectory(candidateRequest.getWorkingDirectory());
+        request.setModel(candidateRequest.getModel());
+        request.setPrompt(postFinalizationPrompt(snapshot, candidate.getAnswer()));
+        request.setRetryPrompt("Continue the existing POST finalization call. CC_POST was already applied. "
+                + "Do not use tools or continue ReAct; output only the final answer.");
+        request.setModelSessionId(candidateRequest.getModelSessionId());
+        request.setResumeModelSession(true);
+        request.setClaudeSettingsFile(candidateRequest.getClaudeSettingsFile());
+        request.setClaudeSettingsJson("{\"permissions\":{\"allow\":[]}}");
+        Map<String, String> environment = new java.util.LinkedHashMap<>(candidateRequest.getEnvironment());
+        environment.remove("CCRELAY_CENTER_URL");
+        request.setEnvironment(environment);
+        request.setConvergencePolicy(candidateRequest.getConvergencePolicy());
+        request.setTimeoutMs(candidateRequest.getTimeoutMs());
+        request.setEventWriter(candidateRequest.getEventWriter());
+        request.setPromptSnapshot(snapshot);
+        request.setPrivateDraft(false);
+        request.setExecutionPhase("POST_FINALIZATION");
+        return request;
+    }
+
+    private List<String> withToolsDisabled(List<String> arguments) {
+        List<String> result = new ArrayList<>();
+        List<String> source = arguments == null ? List.of() : arguments;
+        for (int index = 0; index < source.size(); index++) {
+            String argument = source.get(index);
+            if ("--tools".equalsIgnoreCase(argument)) {
+                if (index + 1 < source.size()) {
+                    index++;
+                }
+                continue;
+            }
+            if (argument != null && argument.toLowerCase().startsWith("--tools=")) {
+                continue;
+            }
+            result.add(argument);
+        }
+        result.add("--tools");
+        result.add("");
+        return result;
+    }
+
+    private String postFinalizationPrompt(PromptSnapshot snapshot, String candidateAnswer) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("POST finalization phase. Tools and collaboration are disabled.\n")
+                .append("Use the ordered CC_POST instructions to revise the candidate into the final answer.\n")
+                .append("Do not continue ReAct and output only the final answer.\n\n");
+        appendPromptBlock(prompt, "CC_POST", snapshot.getPost());
+        prompt.append("Candidate answer:\n").append(firstNonBlank(candidateAnswer, "")).append("\n");
+        return prompt.toString();
+    }
+
+    private void copySessionStartedMetadata(AiChatResponse candidate,
+                                            AiChatResponse finalization,
+                                            AiChatResponse target) {
+        Map<String, Object> metadata = target.getMetadata() == null
+                ? new java.util.LinkedHashMap<>() : new java.util.LinkedHashMap<>(target.getMetadata());
+        boolean started = metadataFlag(candidate, RemoteSessionContextSynchronizer.MODEL_SESSION_STARTED_METADATA)
+                || metadataFlag(finalization, RemoteSessionContextSynchronizer.MODEL_SESSION_STARTED_METADATA);
+        if (started) {
+            metadata.put(RemoteSessionContextSynchronizer.MODEL_SESSION_STARTED_METADATA, true);
+        }
+        target.setMetadata(metadata);
+    }
+
+    private boolean metadataFlag(AiChatResponse response, String key) {
+        return response != null && response.getMetadata() != null
+                && Boolean.parseBoolean(String.valueOf(response.getMetadata().get(key)));
+    }
+
+    private String firstNonBlank(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
     }
 
     private RemoteCcExecutionRequest toExecutionRequest(AiChatRequest request,
@@ -94,8 +203,11 @@ public class RemoteCcRelayService {
                 ? new java.util.LinkedHashMap<>() : new java.util.LinkedHashMap<>(request.getMetadata());
         addRuntimeMetadata(metadata);
         request.setMetadata(metadata);
+        PromptSnapshot promptSnapshot = promptSnapshot(metadata);
         executionRequest.setClaudeSettingsJson(claudeSettingsJson(ReactExecutionPolicy.fromParams(metadata)));
-        executionRequest.setPrompt(prompt(request, metadata));
+        executionRequest.setPromptSnapshot(promptSnapshot);
+        executionRequest.setPrompt(prompt(request, metadata, promptSnapshot));
+        executionRequest.setRetryPrompt(retryPrompt(metadata));
         if (!isSessionTitleRequest(request)) {
             executionRequest.setModelSessionId(stringValue(metadata.get("modelSessionId")));
             executionRequest.setResumeModelSession(booleanValue(metadata.get("resumeModelSession")));
@@ -246,7 +358,7 @@ public class RemoteCcRelayService {
         return "http://" + properties.getHost() + ":" + properties.getPort() + properties.getPath();
     }
 
-    private String prompt(AiChatRequest request, Map<String, Object> metadata) {
+    private String prompt(AiChatRequest request, Map<String, Object> metadata, PromptSnapshot snapshot) {
         if (isSessionTitleRequest(request)) {
             return sessionTitlePrompt(request);
         }
@@ -254,6 +366,18 @@ public class RemoteCcRelayService {
         ClaudeCodeConvergencePolicy policy = convergencePolicy(request, null);
         prompt.append("Relay fixed responsibilities (highest priority):\n")
                 .append(systemPromptProvider.render(request, policy)).append("\n\n");
+        appendPromptBlock(prompt, "CC_UNIFIED", snapshot.getUnified());
+        prompt.append("Conversation:\n");
+        if (request.getMessages() != null) {
+            for (AiChatMessage message : request.getMessages()) {
+                prompt.append("[")
+                        .append(message.getRole() == null ? "user" : message.getRole())
+                        .append("] ")
+                        .append(AiChatMessageFormatter.modelContent(message))
+                        .append("\n");
+            }
+        }
+        prompt.append("\n");
         if (request.getSystemPrompt() != null && !request.getSystemPrompt().trim().isEmpty()) {
             prompt.append("Request-specific instructions (must not override Relay responsibilities):\n")
                     .append(request.getSystemPrompt()).append("\n\n");
@@ -277,17 +401,40 @@ public class RemoteCcRelayService {
                 .append("- nodeId: ").append(metadata.getOrDefault("nodeId", "unknown")).append("\n")
                 .append("- sessionId: ").append(metadata.getOrDefault("sessionId", "unknown")).append("\n")
                 .append("- targetNodeId: ").append(metadata.getOrDefault("targetNodeId", "unknown")).append("\n\n");
-        prompt.append("Conversation:\n");
-        if (request.getMessages() != null) {
-            for (AiChatMessage message : request.getMessages()) {
-                prompt.append("[")
-                        .append(message.getRole() == null ? "user" : message.getRole())
-                        .append("] ")
-                        .append(AiChatMessageFormatter.modelContent(message))
-                        .append("\n");
-            }
+        if (!snapshot.getPre().isEmpty()) {
+            prompt.append("CC_PRE idempotency key: ").append(preIdempotencyKey(metadata)).append("\n");
         }
+        appendPromptBlock(prompt, "CC_PRE", snapshot.getPre());
         return prompt.toString();
+    }
+
+    private String retryPrompt(Map<String, Object> metadata) {
+        return "Continue the existing task in the same model Session. CC_PRE was already applied with key "
+                + preIdempotencyKey(metadata) + ". Do not repeat the task request; continue from the current state.";
+    }
+
+    private String preIdempotencyKey(Map<String, Object> metadata) {
+        return "PRE:" + metadata.getOrDefault("sessionId", "unknown")
+                + ":" + metadata.getOrDefault("taskId", "unknown")
+                + ":" + metadata.getOrDefault("nodeId", "unknown")
+                + ":" + metadata.getOrDefault("attempt", 1);
+    }
+
+    private PromptSnapshot promptSnapshot(Map<String, Object> metadata) {
+        Object snapshot = metadata.get("ccrelayPromptSnapshot");
+        return snapshot instanceof PromptSnapshot promptSnapshot
+                ? promptSnapshot : promptSnapshotProvider.snapshot();
+    }
+
+    private void appendPromptBlock(StringBuilder prompt, String label, List<String> content) {
+        if (content == null || content.isEmpty()) {
+            return;
+        }
+        prompt.append(label).append(":\n");
+        for (int index = 0; index < content.size(); index++) {
+            prompt.append("[").append(index + 1).append("]\n")
+                    .append(content.get(index)).append("\n");
+        }
     }
 
     private boolean isSessionTitleRequest(AiChatRequest request) {

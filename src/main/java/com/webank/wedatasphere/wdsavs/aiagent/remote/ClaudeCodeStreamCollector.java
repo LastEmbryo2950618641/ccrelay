@@ -14,6 +14,7 @@ public class ClaudeCodeStreamCollector {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ReactEventWriter eventWriter;
+    private final boolean privateDraft;
     private final StringBuilder rawOutput = new StringBuilder();
     private final List<String> assistantMessages = new ArrayList<>();
     private final Map<String, Long> toolStartTimes = new LinkedHashMap<>();
@@ -22,7 +23,12 @@ public class ClaudeCodeStreamCollector {
     private boolean structuredOutput;
 
     public ClaudeCodeStreamCollector(ReactEventWriter eventWriter) {
+        this(eventWriter, false);
+    }
+
+    public ClaudeCodeStreamCollector(ReactEventWriter eventWriter, boolean privateDraft) {
         this.eventWriter = eventWriter;
+        this.privateDraft = privateDraft;
     }
 
     public void acceptLine(String line) {
@@ -78,7 +84,9 @@ public class ClaudeCodeStreamCollector {
                 String text = stringValue(block.get("text"));
                 if (notBlank(text)) {
                     assistantMessages.add(text);
-                    emit("AGENT_MESSAGE", Map.of("text", text, "messageId", messageId));
+                    if (!privateDraft) {
+                        emit("AGENT_MESSAGE", Map.of("text", text, "messageId", messageId));
+                    }
                 }
             } else if ("tool_use".equalsIgnoreCase(blockType)) {
                 String toolUseId = firstNonBlank(stringValue(block.get("id")), messageId + ":tool:" + index);
@@ -123,7 +131,9 @@ public class ClaudeCodeStreamCollector {
         putIfPresent(payload, "durationMs", event.get("duration_ms"));
         putIfPresent(payload, "apiDurationMs", event.get("duration_api_ms"));
         putIfPresent(payload, "numTurns", event.get("num_turns"));
-        emit("AGENT_RESULT", payload);
+        if (!privateDraft) {
+            emit("AGENT_RESULT", payload);
+        }
     }
 
     private Map<String, Object> parse(String line) {

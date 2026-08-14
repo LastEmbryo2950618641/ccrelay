@@ -19,6 +19,8 @@ final class RemoteSessionContextStateStore {
     private final Path statePath;
     private final ConcurrentMap<String, Long> cursors = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, String> modelSessionIds = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, String> promptRevisions = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, String> unifiedDigests = new ConcurrentHashMap<>();
     private final java.util.Set<String> startedModelSessions = ConcurrentHashMap.newKeySet();
     private final java.util.Set<String> initializedSessions = ConcurrentHashMap.newKeySet();
 
@@ -45,13 +47,58 @@ final class RemoteSessionContextStateStore {
         return startedModelSessions.contains(sessionId);
     }
 
+    boolean modelSessionStarted(String sessionId, String modelSessionId) {
+        return startedModelSessions.contains(sessionId)
+                && modelSessionId != null && modelSessionId.equals(modelSessionIds.get(sessionId));
+    }
+
+    String rotatedModelSessionId(String sessionId, String localNodeId, String unifiedDigest) {
+        return UUID.nameUUIDFromBytes((value(localNodeId) + "|" + sessionId + "|UNIFIED|" + value(unifiedDigest))
+                .getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    String appliedUnifiedDigest(String sessionId) {
+        return unifiedDigests.get(sessionId);
+    }
+
     synchronized void markModelSessionStarted(String sessionId) {
+        startedModelSessions.add(sessionId);
+        persist();
+    }
+
+    synchronized void markModelSessionStarted(String sessionId, String modelSessionId) {
+        String previous = modelSessionIds.put(sessionId, modelSessionId);
+        if (previous != null && !previous.equals(modelSessionId)) {
+            initializedSessions.remove(sessionId);
+        }
         startedModelSessions.add(sessionId);
         persist();
     }
 
     synchronized void markApplied(String sessionId, long cursor) {
         cursors.merge(sessionId, cursor, Math::max);
+        startedModelSessions.add(sessionId);
+        initializedSessions.add(sessionId);
+        persist();
+    }
+
+    synchronized void markApplied(String sessionId,
+                                  long cursor,
+                                  String modelSessionId,
+                                  String promptRevision,
+                                  String unifiedDigest) {
+        String previous = modelSessionIds.put(sessionId, modelSessionId);
+        if (previous != null && !previous.equals(modelSessionId)) {
+            cursors.put(sessionId, cursor);
+        } else {
+            cursors.merge(sessionId, cursor, Math::max);
+        }
+        if (!isBlank(promptRevision)) {
+            promptRevisions.put(sessionId, promptRevision);
+        }
+        if (!isBlank(unifiedDigest)) {
+            unifiedDigests.put(sessionId, unifiedDigest);
+        }
         startedModelSessions.add(sessionId);
         initializedSessions.add(sessionId);
         persist();
@@ -68,11 +115,19 @@ final class RemoteSessionContextStateStore {
                 Map<String, Object> sessionState = mapValue(entry.getValue());
                 long cursor = longValue(sessionState.get("cursor"));
                 String modelSessionId = stringValue(sessionState.get("modelSessionId"));
+                String promptRevision = stringValue(sessionState.get("appliedPromptRevision"));
+                String unifiedDigest = stringValue(sessionState.get("appliedUnifiedDigest"));
                 if (cursor > 0L) {
                     cursors.put(sessionId, cursor);
                 }
                 if (!isBlank(modelSessionId)) {
                     modelSessionIds.put(sessionId, modelSessionId);
+                }
+                if (!isBlank(promptRevision)) {
+                    promptRevisions.put(sessionId, promptRevision);
+                }
+                if (!isBlank(unifiedDigest)) {
+                    unifiedDigests.put(sessionId, unifiedDigest);
                 }
                 boolean initialized = Boolean.parseBoolean(String.valueOf(sessionState.get("initialized")));
                 if (initialized || Boolean.parseBoolean(String.valueOf(sessionState.get("modelSessionStarted")))) {
@@ -85,6 +140,8 @@ final class RemoteSessionContextStateStore {
         } catch (Exception ignored) {
             cursors.clear();
             modelSessionIds.clear();
+            promptRevisions.clear();
+            unifiedDigests.clear();
             startedModelSessions.clear();
             initializedSessions.clear();
         }
@@ -102,6 +159,8 @@ final class RemoteSessionContextStateStore {
                 sessionState.put("modelSessionId", entry.getValue());
                 sessionState.put("modelSessionStarted", startedModelSessions.contains(entry.getKey()));
                 sessionState.put("initialized", initializedSessions.contains(entry.getKey()));
+                sessionState.put("appliedPromptRevision", promptRevisions.get(entry.getKey()));
+                sessionState.put("appliedUnifiedDigest", unifiedDigests.get(entry.getKey()));
                 state.put(entry.getKey(), sessionState);
             }
             Path parent = statePath.getParent();

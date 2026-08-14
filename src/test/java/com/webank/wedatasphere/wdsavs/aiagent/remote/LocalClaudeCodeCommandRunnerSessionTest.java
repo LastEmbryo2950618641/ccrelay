@@ -34,6 +34,18 @@ class LocalClaudeCodeCommandRunnerSessionTest {
     }
 
     @Test
+    void retryingStartedSessionUsesContinuationPromptWithoutRepeatingPre() {
+        RemoteCcExecutionRequest request = request(false);
+        request.setPrompt("CC_PRE:\n必须先检查证据\n");
+        request.setRetryPrompt("Continue the existing task; CC_PRE was already applied.");
+
+        assertTrue(runner.promptForAttempt(request, 1).contains("必须先检查证据"));
+        request.setResumeModelSession(true);
+        assertFalse(runner.promptForAttempt(request, 2).contains("必须先检查证据"));
+        assertTrue(runner.promptForAttempt(request, 2).contains("already applied"));
+    }
+
+    @Test
     void resumesNamedClaudeSessionOnLaterTurn() {
         RemoteCcExecutionRequest request = request(true);
 

@@ -22,7 +22,9 @@ MAX_PACKAGE_BYTES = 50 * 1024 * 1024
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 100 * 1024 * 1024
 MAX_FILES = 2_000
+MAX_PROMPT_BYTES = 1024 * 1024
 SKILL_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+PROMPT_TYPES = {"UNIFIED", "PRE", "POST"}
 EXCLUDED_NAMES = {".git", ".local", "__pycache__", ".DS_Store"}
 
 
@@ -44,6 +46,77 @@ def add_skill(subparsers: argparse._SubParsersAction) -> None:
     remove = commands.add_parser("remove", help="将 Center Skill 置为 INVALID")
     remove.add_argument("skill_id")
     remove.set_defaults(func=remove_skill)
+
+
+def add_prompt(subparsers: argparse._SubParsersAction) -> None:
+    prompt = subparsers.add_parser("prompt", help="管理 CC Center 固定 Prompt 目录")
+    commands = prompt.add_subparsers(dest="prompt_command", required=True)
+
+    install = commands.add_parser("install", help="发布固定 Prompt")
+    install.add_argument("path", help="UTF-8 Prompt 文本文件")
+    install.add_argument("--id", dest="prompt_id", required=True, help="Prompt 唯一标识")
+    install.add_argument("--type", dest="prompt_type", required=True, choices=sorted(PROMPT_TYPES))
+    install.add_argument("--order", type=int, required=True, help="类型内排序，必须为非负整数")
+    install.set_defaults(func=install_prompt)
+
+    list_parser = commands.add_parser("list", help="列出 Center Prompt 目录")
+    list_parser.set_defaults(func=list_prompts)
+
+    remove = commands.add_parser("remove", help="将 Center Prompt 置为 INVALID")
+    remove.add_argument("prompt_id")
+    remove.set_defaults(func=remove_prompt)
+
+
+def install_prompt(args: argparse.Namespace) -> Dict[str, Any]:
+    prompt_id = str(args.prompt_id).strip()
+    if not SKILL_ID_PATTERN.fullmatch(prompt_id):
+        raise SkillError(f"Invalid Prompt ID: {prompt_id}")
+    prompt_type = str(args.prompt_type).strip().upper()
+    if prompt_type not in PROMPT_TYPES:
+        raise SkillError(f"Invalid Prompt type: {prompt_type}")
+    order = int(args.order)
+    if order < 0:
+        raise SkillError("Prompt order must be non-negative")
+    source = Path(args.path).expanduser().resolve()
+    if not source.is_file():
+        raise SkillError(f"Prompt file does not exist: {source}")
+    content = source.read_bytes()
+    if not content:
+        raise SkillError("Prompt content is required")
+    if len(content) > MAX_PROMPT_BYTES:
+        raise SkillError(f"Prompt content exceeds {MAX_PROMPT_BYTES} bytes")
+    if b"\x00" in content:
+        raise SkillError("Prompt content must not contain NUL characters")
+    try:
+        content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise SkillError("Prompt content must be valid UTF-8") from exc
+    response = request(
+        args,
+        "POST",
+        "/api/prompt/catalog/install",
+        data=content,
+        content_type="text/plain; charset=utf-8",
+        headers={
+            "X-CCRelay-Prompt-Id": prompt_id,
+            "X-CCRelay-Prompt-Type": prompt_type,
+            "X-CCRelay-Prompt-Order": str(order),
+        },
+    )
+    if isinstance(response, dict):
+        response["sourcePath"] = str(source)
+    return response
+
+
+def list_prompts(args: argparse.Namespace) -> Dict[str, Any]:
+    return request(args, "GET", "/api/prompt/catalog")
+
+
+def remove_prompt(args: argparse.Namespace) -> Dict[str, Any]:
+    prompt_id = str(args.prompt_id).strip()
+    if not SKILL_ID_PATTERN.fullmatch(prompt_id):
+        raise SkillError(f"Invalid Prompt ID: {prompt_id}")
+    return request(args, "DELETE", f"/api/prompt/catalog/{urllib.parse.quote(prompt_id, safe='')}")
 
 
 def install_skill(args: argparse.Namespace) -> Dict[str, Any]:
@@ -209,12 +282,15 @@ def request(
     path: str,
     data: bytes | None = None,
     content_type: str | None = None,
+    headers: Dict[str, str] | None = None,
 ) -> Any:
     url = args.center.rstrip("/") + (path if path.startswith("/") else "/" + path)
-    headers = {"Accept": "application/json"}
+    request_headers = {"Accept": "application/json"}
     if content_type:
-        headers["Content-Type"] = content_type
-    request_value = urllib.request.Request(url, data=data, headers=headers, method=method)
+        request_headers["Content-Type"] = content_type
+    if headers:
+        request_headers.update(headers)
+    request_value = urllib.request.Request(url, data=data, headers=request_headers, method=method)
     with urllib.request.urlopen(request_value, timeout=args.timeout) as response:
         text = response.read().decode("utf-8", errors="replace")
         if not text:

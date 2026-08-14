@@ -53,4 +53,18 @@ class ClaudeCodeStreamCollectorTest {
         assertFalse(collector.isStructuredOutput());
         assertEquals("plain final answer", collector.answer());
     }
+
+    @Test
+    void privateDraftSuppressesMessagesAndResultButKeepsToolProgress() {
+        List<String> types = new ArrayList<>();
+        ClaudeCodeStreamCollector collector = new ClaudeCodeStreamCollector(
+                (type, payload) -> types.add(type), true);
+
+        collector.acceptLine("{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"候选答案\"},{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Bash\",\"input\":{}}]}}");
+        collector.acceptLine("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"tool-1\",\"content\":\"ok\"}]}}");
+        collector.acceptLine("{\"type\":\"result\",\"is_error\":false,\"result\":\"候选最终答案\"}");
+
+        assertEquals("候选最终答案", collector.answer());
+        assertEquals(List.of("AGENT_TOOL_STARTED", "AGENT_TOOL_FINISHED"), types);
+    }
 }

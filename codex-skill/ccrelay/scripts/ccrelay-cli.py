@@ -114,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_agent(subparsers)
     add_config(subparsers)
     ccrelay_skill.add_skill(subparsers)
+    ccrelay_skill.add_prompt(subparsers)
     add_ssh(subparsers)
     add_observation(subparsers)
     add_deploy(subparsers)

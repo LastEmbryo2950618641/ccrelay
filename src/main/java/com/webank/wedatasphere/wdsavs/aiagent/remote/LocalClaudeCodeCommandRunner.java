@@ -32,7 +32,14 @@ public class LocalClaudeCodeCommandRunner implements RemoteCcCommandRunner {
             if (remainingMs <= 0L) {
                 return timeoutResponse();
             }
-            ExecutionAttempt executionAttempt = executeOnce(request, remainingMs);
+            String originalPrompt = request.getPrompt();
+            ExecutionAttempt executionAttempt;
+            try {
+                request.setPrompt(promptForAttempt(request, attempt));
+                executionAttempt = executeOnce(request, remainingMs);
+            } finally {
+                request.setPrompt(originalPrompt);
+            }
             lastResponse = executionAttempt.response();
             if (executionAttempt.modelSessionStarted()) {
                 markModelSessionStarted(lastResponse);
@@ -70,7 +77,8 @@ public class LocalClaudeCodeCommandRunner implements RemoteCcCommandRunner {
             process.getOutputStream().write(limitedPrompt(request).getBytes(StandardCharsets.UTF_8));
             process.getOutputStream().close();
 
-            ClaudeCodeStreamCollector collector = new ClaudeCodeStreamCollector(request.getEventWriter());
+            ClaudeCodeStreamCollector collector = new ClaudeCodeStreamCollector(
+                    request.getEventWriter(), request.isPrivateDraft());
             stdout = CompletableFuture.runAsync(() -> readOutput(process.getInputStream(), collector));
             stderr = CompletableFuture.supplyAsync(() -> readText(process.getErrorStream()));
             boolean finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
@@ -97,6 +105,14 @@ public class LocalClaudeCodeCommandRunner implements RemoteCcCommandRunner {
         } finally {
             deleteRequestSettingsFile(requestSettingsFile);
         }
+    }
+
+    String promptForAttempt(RemoteCcExecutionRequest request, int attempt) {
+        if (attempt > 1 && request.isResumeModelSession()
+                && request.getRetryPrompt() != null && !request.getRetryPrompt().isBlank()) {
+            return request.getRetryPrompt();
+        }
+        return request.getPrompt();
     }
 
     private boolean startsNamedModelSession(List<String> commandLine) {

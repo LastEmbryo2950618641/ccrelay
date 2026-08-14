@@ -4,7 +4,11 @@ import com.webank.wedatasphere.wdsavs.aiagent.model.AiChatMessage;
 import com.webank.wedatasphere.wdsavs.aiagent.model.AiChatRequest;
 import com.webank.wedatasphere.wdsavs.aiagent.model.AiChatResponse;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -14,6 +18,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class RemoteCcRelayServicePromptTest {
+
+    @TempDir
+    Path temporaryDirectory;
 
     @Test
     void injectsFixedRelayResponsibilitiesBeforeRequestInstructions() {
@@ -114,6 +121,39 @@ class RemoteCcRelayServicePromptTest {
     }
 
     @Test
+    void placesUnifiedBeforeSharedConversationAndPreImmediatelyBeforeWork() throws Exception {
+        RemoteCcRelayProperties properties = new RemoteCcRelayProperties();
+        properties.setWorkingDirectory(temporaryDirectory.toString());
+        properties.setPromptMetadataPath(temporaryDirectory.resolve("relay-prompts.json").toString());
+        RelayPromptMetadataStore store = new RelayPromptMetadataStore(properties);
+        Path unifiedPath = temporaryDirectory.resolve("unified.md");
+        Path prePath = temporaryDirectory.resolve("pre.md");
+        Files.writeString(unifiedPath, "全局必须引用证据", StandardCharsets.UTF_8);
+        Files.writeString(prePath, "本轮先检查输入完整性", StandardCharsets.UTF_8);
+        RelayPromptCatalogState state = new RelayPromptCatalogState();
+        state.setCatalogSha256("catalog-one");
+        state.setPrompts(List.of(
+                promptMetadata("shared", "UNIFIED", 1, "sha-unified", unifiedPath),
+                promptMetadata("check", "PRE", 1, "sha-pre", prePath)));
+        store.save(state);
+        List<RemoteCcExecutionRequest> captured = new ArrayList<>();
+        RemoteCcRelayService service = new RemoteCcRelayService(properties, request -> {
+            captured.add(request);
+            return new AiChatResponse("ok", "SUCCESS", "trace");
+        });
+        AiChatRequest request = new AiChatRequest();
+        request.setMessages(List.of(new AiChatMessage("user", "检查服务")));
+
+        service.relay(request);
+
+        String prompt = captured.get(0).getPrompt();
+        assertTrue(prompt.indexOf("Relay fixed responsibilities") < prompt.indexOf("CC_UNIFIED"));
+        assertTrue(prompt.indexOf("全局必须引用证据") < prompt.indexOf("Conversation:"));
+        assertTrue(prompt.indexOf("[user] 检查服务") < prompt.indexOf("CC_PRE"));
+        assertTrue(prompt.endsWith("本轮先检查输入完整性\n"));
+    }
+
+    @Test
     void requestScopedTimeoutLimitsOnlyThatModelExecution() {
         RemoteCcRelayProperties properties = new RemoteCcRelayProperties();
         properties.setTimeoutMs(600000L);
@@ -166,5 +206,31 @@ class RemoteCcRelayServicePromptTest {
         assertFalse(execution.getPrompt().contains("历史回复"));
         assertEquals(null, execution.getModelSessionId());
         assertFalse(execution.isResumeModelSession());
+    }
+
+    private RelayPromptMetadata promptMetadata(String id, String type, int order, String sha256, Path path) {
+        RelayPromptMetadata metadata = new RelayPromptMetadata();
+        metadata.setPromptId(id);
+        metadata.setType(type);
+        metadata.setOrder(order);
+        String actualSha256 = fileSha256(path);
+        metadata.setCenterSha256(actualSha256);
+        metadata.setInstalledSha256(actualSha256);
+        metadata.setStatus("INSTALLED");
+        metadata.setContentPath(path.toString());
+        metadata.setUpdatedAt(System.currentTimeMillis());
+        return metadata;
+    }
+
+    private String fileSha256(Path path) {
+        try {
+            StringBuilder result = new StringBuilder();
+            for (byte value : java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path))) {
+                result.append(String.format("%02x", value & 0xff));
+            }
+            return result.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

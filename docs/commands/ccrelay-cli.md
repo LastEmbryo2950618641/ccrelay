@@ -118,6 +118,22 @@ HMAC secret 属于跨进程配置。`config secret set wdsavs.ai.relay.hmac-secr
 
 `skill remove` 是逻辑失效操作，不直接删除 Center 元数据。Relay 上的传输或校验失败保持 `INSTALLING` 并记录错误，后续心跳继续重试；只有 Center 已失效或完整目录中不存在的 Skill 才进入 `INVALID`。
 
+### Prompt 管理
+
+- `prompt install <file> --id <promptId> --type UNIFIED|PRE|POST --order <n>`：安装或替换固定 Prompt。
+- `prompt list`：查看 Center Prompt 目录、类型内顺序、状态和 SHA-256。
+- `prompt remove <promptId>`：将 Prompt 置为 `INVALID`，Relay 在完整 revision 同步后移除本地内容。
+
+```powershell
+<CLI> prompt install C:\path\to\shared-rules.md --id shared-rules --type UNIFIED --order 10
+<CLI> prompt install C:\path\to\evidence-check.md --id evidence-check --type PRE --order 20
+<CLI> prompt install C:\path\to\final-review.md --id final-review --type POST --order 10
+<CLI> prompt list
+<CLI> prompt remove final-review
+```
+
+三种类型内部都按 `order ASC, promptId ASC` 排序。`UNIFIED` 形成稳定会话前缀，`PRE` 在正式 ReAct 前注入，`POST` 通过禁用工具和协作的私有第二次模型调用定稿。候选回复和 Prompt 内容不进入 Center 共享上下文；POST 定稿失败返回 `POST_FINALIZATION_FAILED`，不会回退发布候选回复。
+
 ### 会话
 
 - `session open`：打开会话。
